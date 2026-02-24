@@ -28,7 +28,6 @@ def init_db():
     conn = get_db()
     c = conn.cursor()
     
-    # Создаем базовые таблицы, если их нет
     c.execute('''CREATE TABLE IF NOT EXISTS parties (
                     code TEXT PRIMARY KEY, 
                     boss_hp INTEGER,
@@ -41,21 +40,30 @@ def init_db():
                     avatar TEXT
                  )''')
     
-    # Железобетонное обновление базы: проверяем и добавляем КАЖДУЮ колонку отдельно
-    columns_to_add = [
-        ("parties", "mega_progress", "INTEGER DEFAULT 0"),
-        ("parties", "mega_target", "INTEGER DEFAULT 36000"),
-        ("parties", "expedition_end", "INTEGER DEFAULT 0"),
-        ("parties", "expedition_score", "INTEGER DEFAULT 0"),
-        ("parties", "leader_id", "TEXT DEFAULT ''"),
-        ("parties", "active_game", "TEXT DEFAULT 'none'")
+    # Обновление таблиц для всех мини-игр и Гонки Яиц
+    party_columns = [
+        ("mega_progress", "INTEGER DEFAULT 0"),
+        ("mega_target", "INTEGER DEFAULT 36000"),
+        ("expedition_end", "INTEGER DEFAULT 0"),
+        ("expedition_score", "INTEGER DEFAULT 0"),
+        ("leader_id", "TEXT DEFAULT ''"),
+        ("active_game", "TEXT DEFAULT 'none'")
     ]
-    
-    for table, col_name, col_type in columns_to_add:
+    for col, col_type in party_columns:
         try:
-            c.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}")
+            c.execute(f"ALTER TABLE parties ADD COLUMN {col} {col_type}")
         except sqlite3.OperationalError:
-            # Если колонка уже есть, база выдаст ошибку, мы ее просто игнорируем и идем к следующей
+            pass
+
+    # НОВЫЕ КОЛОНКИ ДЛЯ ИГРОКОВ (Для Гонки Яиц)
+    player_columns = [
+        ("boss_hp", "INTEGER DEFAULT 10000"),
+        ("egg_skin", "TEXT DEFAULT 'default'")
+    ]
+    for col, col_type in player_columns:
+        try:
+            c.execute(f"ALTER TABLE players ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError:
             pass
 
     conn.commit()
@@ -67,12 +75,14 @@ class PlayerData(BaseModel):
     user_id: str
     name: str
     avatar: str
+    egg_skin: str
 
 class JoinData(PlayerData):
     code: str
 
 class DamageData(BaseModel):
     code: str
+    user_id: str
     damage: int
 
 class TimeData(BaseModel):
@@ -89,7 +99,7 @@ class SetGameData(BaseModel):
 
 @app.get("/")
 def read_root():
-    return {"status": "Focus Hatcher Backend v2 - Multiplayer Sync Active!"}
+    return {"status": "Focus Hatcher Backend v3 - Egg Race Active!"}
 
 @app.post("/api/party/create")
 def create_party(data: PlayerData):
@@ -99,8 +109,8 @@ def create_party(data: PlayerData):
     c.execute("INSERT INTO parties (code, boss_hp, boss_max_hp, mega_progress, mega_target, expedition_end, expedition_score, leader_id, active_game) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", 
               (code, 10000, 10000, 0, 36000, 0, 0, data.user_id, 'none'))
     c.execute("DELETE FROM players WHERE user_id=?", (data.user_id,))
-    c.execute("INSERT INTO players (user_id, party_code, name, avatar) VALUES (?, ?, ?, ?)", 
-              (data.user_id, code, data.name, data.avatar))
+    c.execute("INSERT INTO players (user_id, party_code, name, avatar, boss_hp, egg_skin) VALUES (?, ?, ?, ?, ?, ?)", 
+              (data.user_id, code, data.name, data.avatar, 10000, data.egg_skin))
     conn.commit()
     conn.close()
     return {"status": "success", "partyCode": code}
@@ -114,8 +124,8 @@ def join_party(data: JoinData):
         conn.close()
         raise HTTPException(status_code=404, detail="Пати не найдено")
     c.execute("DELETE FROM players WHERE user_id=?", (data.user_id,))
-    c.execute("INSERT INTO players (user_id, party_code, name, avatar) VALUES (?, ?, ?, ?)", 
-              (data.user_id, data.code, data.name, data.avatar))
+    c.execute("INSERT INTO players (user_id, party_code, name, avatar, boss_hp, egg_skin) VALUES (?, ?, ?, ?, ?, ?)", 
+              (data.user_id, data.code, data.name, data.avatar, 10000, data.egg_skin))
     conn.commit()
     conn.close()
     return {"status": "success"}
@@ -129,7 +139,9 @@ def get_party_status(code: str):
     if not party:
         conn.close()
         raise HTTPException(status_code=404, detail="Пати не найдено")
-    c.execute("SELECT name, avatar FROM players WHERE party_code=?", (code,))
+    
+    # Теперь мы забираем и ХП каждого игрока, и скин его яйца
+    c.execute("SELECT user_id, name, avatar, boss_hp, egg_skin FROM players WHERE party_code=?", (code,))
     players = [dict(row) for row in c.fetchall()]
     conn.close()
     return {
@@ -153,7 +165,8 @@ def set_game(data: SetGameData):
     if party and party["leader_id"] == data.user_id:
         c.execute("UPDATE parties SET active_game=? WHERE code=?", (data.game_name, data.code))
         if data.game_name == 'tap_boss':
-            c.execute("UPDATE parties SET boss_hp=boss_max_hp WHERE code=?", (data.code,))
+            # Сбрасываем ХП яйца ВСЕМ игрокам в этом пати
+            c.execute("UPDATE players SET boss_hp=10000 WHERE party_code=?", (data.code,))
         conn.commit()
     conn.close()
     return {"status": "success"}
@@ -162,13 +175,14 @@ def set_game(data: SetGameData):
 def deal_damage(data: DamageData):
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT boss_hp FROM parties WHERE code=?", (data.code,))
-    party = c.fetchone()
-    if not party:
+    # Урон теперь наносится ИНДИВИДУАЛЬНОМУ яйцу игрока
+    c.execute("SELECT boss_hp FROM players WHERE user_id=? AND party_code=?", (data.user_id, data.code))
+    player = c.fetchone()
+    if not player:
         conn.close()
         return {"status": "error"}
-    new_hp = max(0, party["boss_hp"] - data.damage)
-    c.execute("UPDATE parties SET boss_hp=? WHERE code=?", (new_hp, data.code))
+    new_hp = max(0, player["boss_hp"] - data.damage)
+    c.execute("UPDATE players SET boss_hp=? WHERE user_id=? AND party_code=?", (new_hp, data.user_id, data.code))
     conn.commit()
     conn.close()
     return {"status": "success", "new_hp": new_hp}
@@ -201,7 +215,6 @@ def start_expedition(data: CodeOnly):
     c = conn.cursor()
     c.execute("SELECT avatar FROM players WHERE party_code=?", (data.code,))
     players = c.fetchall()
-    
     score = 0
     legendary = ["unicorn", "dragon", "alien", "robot", "dino", "fireball", "god"]
     rare = ["fox", "panda", "tiger", "lion", "cow", "pig", "monkey", "owl"]
@@ -210,7 +223,6 @@ def start_expedition(data: CodeOnly):
         if av in legendary: score += 10
         elif av in rare: score += 3
         else: score += 1
-        
     end_time = int(time.time()) + (4 * 3600)
     c.execute("UPDATE parties SET expedition_end=?, expedition_score=? WHERE code=?", (end_time, score, data.code))
     conn.commit()

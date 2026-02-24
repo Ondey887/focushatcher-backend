@@ -39,7 +39,8 @@ def init_db():
         ("mega_progress", "INTEGER DEFAULT 0"), ("mega_target", "INTEGER DEFAULT 36000"),
         ("expedition_end", "INTEGER DEFAULT 0"), ("expedition_score", "INTEGER DEFAULT 0"),
         ("leader_id", "TEXT DEFAULT ''"), ("active_game", "TEXT DEFAULT 'none'"),
-        ("expedition_location", "TEXT DEFAULT 'forest'") # НОВАЯ КОЛОНКА ДЛЯ ЛОКАЦИИ
+        ("expedition_location", "TEXT DEFAULT 'forest'"),
+        ("wolf_hp", "INTEGER DEFAULT 0"), ("wolf_max_hp", "INTEGER DEFAULT 0") # НОВЫЕ КОЛОНКИ ДЛЯ ВОЛКА
     ]
     for col, col_type in party_columns:
         try: c.execute(f"ALTER TABLE parties ADD COLUMN {col} {col_type}")
@@ -77,21 +78,18 @@ class SetGameData(BaseModel): code: str; user_id: str; game_name: str
 class GlobalUserSync(BaseModel): user_id: str; name: str; avatar: str; level: int; earned: int; hatched: int
 class FriendAction(BaseModel): user_id: str; friend_id: str
 class InviteData(BaseModel): sender_id: str; receiver_id: str; party_code: str
-
-# НОВАЯ МОДЕЛЬ ДЛЯ СТАРТА ЭКСПЕДИЦИИ
 class ExpeditionStartData(BaseModel): code: str; location: str
 
-# --- РОУТЫ ---
 @app.get("/")
-def read_root(): return {"status": "Focus Hatcher Backend v5 - Expeditions 2.0!"}
+def read_root(): return {"status": "Focus Hatcher Backend v6 - Wolf Event Active!"}
 
 @app.post("/api/party/create")
 def create_party(data: PlayerData):
     conn = get_db()
     c = conn.cursor()
     code = str(random.randint(1000, 9999))
-    c.execute("INSERT INTO parties (code, boss_hp, boss_max_hp, mega_progress, mega_target, expedition_end, expedition_score, leader_id, active_game, expedition_location) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 
-              (code, 10000, 10000, 0, 36000, 0, 0, data.user_id, 'none', 'forest'))
+    c.execute("INSERT INTO parties (code, boss_hp, boss_max_hp, mega_progress, mega_target, expedition_end, expedition_score, leader_id, active_game, expedition_location, wolf_hp, wolf_max_hp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 
+              (code, 10000, 10000, 0, 36000, 0, 0, data.user_id, 'none', 'forest', 0, 0))
     c.execute("DELETE FROM players WHERE user_id=?", (data.user_id,))
     c.execute("INSERT INTO players (user_id, party_code, name, avatar, boss_hp, egg_skin) VALUES (?, ?, ?, ?, ?, ?)", 
               (data.user_id, code, data.name, data.avatar, 10000, data.egg_skin))
@@ -130,7 +128,7 @@ def get_party_status(code: str):
         "boss_hp": party["boss_hp"], "boss_max_hp": party["boss_max_hp"],
         "mega_progress": party["mega_progress"], "mega_target": party["mega_target"],
         "expedition_end": party["expedition_end"], "expedition_score": party["expedition_score"],
-        "expedition_location": party["expedition_location"], # Возвращаем локацию
+        "expedition_location": party["expedition_location"], "wolf_hp": party["wolf_hp"], "wolf_max_hp": party["wolf_max_hp"],
         "leader_id": party["leader_id"], "active_game": party["active_game"], "players": players
     }
 
@@ -163,6 +161,20 @@ def deal_damage(data: DamageData):
     conn.close()
     return {"status": "success", "new_hp": new_hp}
 
+# НОВЫЙ УРОН ПО ВОЛКУ В ЭКСПЕДИЦИИ
+@app.post("/api/party/expedition/wolf_damage")
+def wolf_damage(data: DamageData):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT wolf_hp FROM parties WHERE code=?", (data.code,))
+    party = c.fetchone()
+    if party and party["wolf_hp"] > 0:
+        new_hp = max(0, party["wolf_hp"] - data.damage)
+        c.execute("UPDATE parties SET wolf_hp=? WHERE code=?", (new_hp, data.code))
+        conn.commit()
+    conn.close()
+    return {"status": "success"}
+
 @app.post("/api/party/mega_egg/add")
 def add_mega_egg_time(data: TimeData):
     conn = get_db()
@@ -185,7 +197,6 @@ def claim_mega_egg(data: CodeOnly):
     conn.close()
     return {"status": "success"}
 
-# --- ОБНОВЛЕННАЯ ЛОГИКА ЭКСПЕДИЦИЙ ---
 @app.post("/api/party/expedition/start")
 def start_expedition(data: ExpeditionStartData):
     conn = get_db()
@@ -193,38 +204,33 @@ def start_expedition(data: ExpeditionStartData):
     c.execute("SELECT avatar FROM players WHERE party_code=?", (data.code,))
     players = c.fetchall()
     
-    score = 0
-    farm_count = 0
-    predator_count = 0
-
-    # Расчет базовых очков и синергий
+    score = 0; farm_count = 0; pred_count = 0
     for p in players:
         av = p["avatar"]
         if av in ["unicorn", "dragon", "alien", "robot", "dino", "fireball", "god"]: score += 10
         elif av in ["fox", "panda", "tiger", "lion", "cow", "pig", "monkey", "owl"]: score += 3
         else: score += 1
         
-        # Синергии
         if av in ["cow", "pig", "duck"]: farm_count += 1
-        if av in ["kitten", "tiger", "lion", "fox"]: predator_count += 1
+        if av in ["kitten", "tiger", "lion", "fox"]: pred_count += 1
 
-    # Синергия "Ферма" (минимум 3)
-    if farm_count >= 3:
-        score = int(score * 1.5)
+    if farm_count >= 3: score = int(score * 1.5)
 
-    # Тайминги локаций (Лес: 25м, Горы: 60м, Космос: 120м)
     base_time = 25 * 60
     if data.location == 'mountains': base_time = 60 * 60
     elif data.location == 'space': base_time = 120 * 60
 
-    # Синергия "Хищники" (минимум 2)
-    if predator_count >= 2:
-        base_time = int(base_time * 0.85)
+    if pred_count >= 2: base_time = int(base_time * 0.85)
 
     end_time = int(time.time()) + base_time
+
+    # 40% шанс на нападение волка при старте
+    wolf_hp = 0
+    if random.random() < 0.40:
+        wolf_hp = len(players) * 50 # По 50 кликов на каждого игрока
     
-    c.execute("UPDATE parties SET expedition_end=?, expedition_score=?, expedition_location=? WHERE code=?", 
-              (end_time, score, data.location, data.code))
+    c.execute("UPDATE parties SET expedition_end=?, expedition_score=?, expedition_location=?, wolf_hp=?, wolf_max_hp=? WHERE code=?", 
+              (end_time, score, data.location, wolf_hp, wolf_hp, data.code))
     conn.commit()
     conn.close()
     return {"status": "success", "end_time": end_time}
@@ -233,7 +239,7 @@ def start_expedition(data: ExpeditionStartData):
 def claim_expedition(data: CodeOnly):
     conn = get_db()
     c = conn.cursor()
-    c.execute("UPDATE parties SET expedition_end=0, expedition_score=0 WHERE code=?", (data.code,))
+    c.execute("UPDATE parties SET expedition_end=0, expedition_score=0, wolf_hp=0 WHERE code=?", (data.code,))
     conn.commit()
     conn.close()
     return {"status": "success"}
@@ -247,7 +253,6 @@ def leave_party(data: PlayerData):
     conn.close()
     return {"status": "success"}
 
-# --- РОУТЫ ДРУЗЕЙ (Оставлены без изменений) ---
 @app.post("/api/users/sync")
 def sync_global_user(data: GlobalUserSync):
     conn = get_db()
@@ -268,9 +273,7 @@ def add_friend(data: FriendAction):
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT * FROM global_users WHERE user_id=?", (data.friend_id,))
-    if not c.fetchone():
-        conn.close()
-        return {"status": "error", "detail": "Игрок не найден"}
+    if not c.fetchone(): return {"status": "error", "detail": "Игрок не найден"}
     try:
         c.execute("INSERT INTO friends (user_id, friend_id) VALUES (?, ?)", (data.user_id, data.friend_id))
         c.execute("INSERT INTO friends (user_id, friend_id) VALUES (?, ?)", (data.friend_id, data.user_id))
@@ -303,10 +306,9 @@ def send_invite(data: InviteData):
 def check_invites(user_id: str):
     conn = get_db()
     c = conn.cursor()
-    current_time = int(time.time())
     c.execute('''SELECT i.id, i.party_code, g.name as sender_name, g.avatar as sender_avatar 
                  FROM party_invites i JOIN global_users g ON i.sender_id = g.user_id
-                 WHERE i.receiver_id=? AND (? - i.timestamp) < 300 LIMIT 1''', (user_id, current_time))
+                 WHERE i.receiver_id=? AND (? - i.timestamp) < 300 LIMIT 1''', (user_id, int(time.time())))
     invite = c.fetchone()
     conn.close()
     if invite: return {"has_invite": True, "invite": dict(invite)}

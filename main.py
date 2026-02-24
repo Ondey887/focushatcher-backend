@@ -28,7 +28,6 @@ def init_db():
     conn = get_db()
     c = conn.cursor()
     
-    # Существующие таблицы пати
     c.execute('''CREATE TABLE IF NOT EXISTS parties (
                     code TEXT PRIMARY KEY, boss_hp INTEGER, boss_max_hp INTEGER
                  )''')
@@ -39,7 +38,8 @@ def init_db():
     party_columns = [
         ("mega_progress", "INTEGER DEFAULT 0"), ("mega_target", "INTEGER DEFAULT 36000"),
         ("expedition_end", "INTEGER DEFAULT 0"), ("expedition_score", "INTEGER DEFAULT 0"),
-        ("leader_id", "TEXT DEFAULT ''"), ("active_game", "TEXT DEFAULT 'none'")
+        ("leader_id", "TEXT DEFAULT ''"), ("active_game", "TEXT DEFAULT 'none'"),
+        ("expedition_location", "TEXT DEFAULT 'forest'") # НОВАЯ КОЛОНКА ДЛЯ ЛОКАЦИИ
     ]
     for col, col_type in party_columns:
         try: c.execute(f"ALTER TABLE parties ADD COLUMN {col} {col_type}")
@@ -50,7 +50,6 @@ def init_db():
         try: c.execute(f"ALTER TABLE players ADD COLUMN {col} {col_type}")
         except sqlite3.OperationalError: pass
 
-    # НОВЫЕ ТАБЛИЦЫ ДЛЯ ДРУЗЕЙ И ПРОФИЛЕЙ
     c.execute('''CREATE TABLE IF NOT EXISTS global_users (
                     user_id TEXT PRIMARY KEY, name TEXT, avatar TEXT, 
                     level INTEGER, earned INTEGER, hatched INTEGER
@@ -75,27 +74,24 @@ class DamageData(BaseModel): code: str; user_id: str; damage: int
 class TimeData(BaseModel): code: str; seconds: int
 class CodeOnly(BaseModel): code: str
 class SetGameData(BaseModel): code: str; user_id: str; game_name: str
+class GlobalUserSync(BaseModel): user_id: str; name: str; avatar: str; level: int; earned: int; hatched: int
+class FriendAction(BaseModel): user_id: str; friend_id: str
+class InviteData(BaseModel): sender_id: str; receiver_id: str; party_code: str
 
-class GlobalUserSync(BaseModel):
-    user_id: str; name: str; avatar: str; level: int; earned: int; hatched: int
+# НОВАЯ МОДЕЛЬ ДЛЯ СТАРТА ЭКСПЕДИЦИИ
+class ExpeditionStartData(BaseModel): code: str; location: str
 
-class FriendAction(BaseModel):
-    user_id: str; friend_id: str
-
-class InviteData(BaseModel):
-    sender_id: str; receiver_id: str; party_code: str
-
-# --- СТАРЫЕ РОУТЫ ПАТИ ---
+# --- РОУТЫ ---
 @app.get("/")
-def read_root(): return {"status": "Focus Hatcher Backend v4 - Friends System Active!"}
+def read_root(): return {"status": "Focus Hatcher Backend v5 - Expeditions 2.0!"}
 
 @app.post("/api/party/create")
 def create_party(data: PlayerData):
     conn = get_db()
     c = conn.cursor()
     code = str(random.randint(1000, 9999))
-    c.execute("INSERT INTO parties (code, boss_hp, boss_max_hp, mega_progress, mega_target, expedition_end, expedition_score, leader_id, active_game) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", 
-              (code, 10000, 10000, 0, 36000, 0, 0, data.user_id, 'none'))
+    c.execute("INSERT INTO parties (code, boss_hp, boss_max_hp, mega_progress, mega_target, expedition_end, expedition_score, leader_id, active_game, expedition_location) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 
+              (code, 10000, 10000, 0, 36000, 0, 0, data.user_id, 'none', 'forest'))
     c.execute("DELETE FROM players WHERE user_id=?", (data.user_id,))
     c.execute("INSERT INTO players (user_id, party_code, name, avatar, boss_hp, egg_skin) VALUES (?, ?, ?, ?, ?, ?)", 
               (data.user_id, code, data.name, data.avatar, 10000, data.egg_skin))
@@ -134,6 +130,7 @@ def get_party_status(code: str):
         "boss_hp": party["boss_hp"], "boss_max_hp": party["boss_max_hp"],
         "mega_progress": party["mega_progress"], "mega_target": party["mega_target"],
         "expedition_end": party["expedition_end"], "expedition_score": party["expedition_score"],
+        "expedition_location": party["expedition_location"], # Возвращаем локацию
         "leader_id": party["leader_id"], "active_game": party["active_game"], "players": players
     }
 
@@ -188,20 +185,46 @@ def claim_mega_egg(data: CodeOnly):
     conn.close()
     return {"status": "success"}
 
+# --- ОБНОВЛЕННАЯ ЛОГИКА ЭКСПЕДИЦИЙ ---
 @app.post("/api/party/expedition/start")
-def start_expedition(data: CodeOnly):
+def start_expedition(data: ExpeditionStartData):
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT avatar FROM players WHERE party_code=?", (data.code,))
     players = c.fetchall()
+    
     score = 0
+    farm_count = 0
+    predator_count = 0
+
+    # Расчет базовых очков и синергий
     for p in players:
         av = p["avatar"]
         if av in ["unicorn", "dragon", "alien", "robot", "dino", "fireball", "god"]: score += 10
         elif av in ["fox", "panda", "tiger", "lion", "cow", "pig", "monkey", "owl"]: score += 3
         else: score += 1
-    end_time = int(time.time()) + (4 * 3600)
-    c.execute("UPDATE parties SET expedition_end=?, expedition_score=? WHERE code=?", (end_time, score, data.code))
+        
+        # Синергии
+        if av in ["cow", "pig", "duck"]: farm_count += 1
+        if av in ["kitten", "tiger", "lion", "fox"]: predator_count += 1
+
+    # Синергия "Ферма" (минимум 3)
+    if farm_count >= 3:
+        score = int(score * 1.5)
+
+    # Тайминги локаций (Лес: 25м, Горы: 60м, Космос: 120м)
+    base_time = 25 * 60
+    if data.location == 'mountains': base_time = 60 * 60
+    elif data.location == 'space': base_time = 120 * 60
+
+    # Синергия "Хищники" (минимум 2)
+    if predator_count >= 2:
+        base_time = int(base_time * 0.85)
+
+    end_time = int(time.time()) + base_time
+    
+    c.execute("UPDATE parties SET expedition_end=?, expedition_score=?, expedition_location=? WHERE code=?", 
+              (end_time, score, data.location, data.code))
     conn.commit()
     conn.close()
     return {"status": "success", "end_time": end_time}
@@ -224,9 +247,7 @@ def leave_party(data: PlayerData):
     conn.close()
     return {"status": "success"}
 
-
-# --- НОВЫЕ РОУТЫ: ДРУЗЬЯ И ПРОФИЛИ ---
-
+# --- РОУТЫ ДРУЗЕЙ (Оставлены без изменений) ---
 @app.post("/api/users/sync")
 def sync_global_user(data: GlobalUserSync):
     conn = get_db()
@@ -243,23 +264,18 @@ def sync_global_user(data: GlobalUserSync):
 
 @app.post("/api/friends/add")
 def add_friend(data: FriendAction):
-    if data.user_id == data.friend_id:
-        return {"status": "error", "detail": "Нельзя добавить себя"}
+    if data.user_id == data.friend_id: return {"status": "error", "detail": "Нельзя добавить себя"}
     conn = get_db()
     c = conn.cursor()
-    # Проверяем существует ли такой юзер
     c.execute("SELECT * FROM global_users WHERE user_id=?", (data.friend_id,))
     if not c.fetchone():
         conn.close()
         return {"status": "error", "detail": "Игрок не найден"}
-    
-    # Добавляем двустороннюю дружбу
     try:
         c.execute("INSERT INTO friends (user_id, friend_id) VALUES (?, ?)", (data.user_id, data.friend_id))
         c.execute("INSERT INTO friends (user_id, friend_id) VALUES (?, ?)", (data.friend_id, data.user_id))
         conn.commit()
-    except sqlite3.IntegrityError:
-        pass # Уже в друзьях
+    except sqlite3.IntegrityError: pass 
     conn.close()
     return {"status": "success"}
 
@@ -267,9 +283,7 @@ def add_friend(data: FriendAction):
 def get_friends_list(user_id: str):
     conn = get_db()
     c = conn.cursor()
-    c.execute('''SELECT g.* FROM friends f 
-                 JOIN global_users g ON f.friend_id = g.user_id 
-                 WHERE f.user_id=?''', (user_id,))
+    c.execute('''SELECT g.* FROM friends f JOIN global_users g ON f.friend_id = g.user_id WHERE f.user_id=?''', (user_id,))
     friends = [dict(row) for row in c.fetchall()]
     conn.close()
     return {"friends": friends}
@@ -278,7 +292,6 @@ def get_friends_list(user_id: str):
 def send_invite(data: InviteData):
     conn = get_db()
     c = conn.cursor()
-    # Удаляем старые инвайты от этого человека этому другу, чтобы не спамить
     c.execute("DELETE FROM party_invites WHERE sender_id=? AND receiver_id=?", (data.sender_id, data.receiver_id))
     c.execute("INSERT INTO party_invites (sender_id, receiver_id, party_code, timestamp) VALUES (?, ?, ?, ?)", 
               (data.sender_id, data.receiver_id, data.party_code, int(time.time())))
@@ -290,23 +303,20 @@ def send_invite(data: InviteData):
 def check_invites(user_id: str):
     conn = get_db()
     c = conn.cursor()
-    # Ищем инвайты не старше 5 минут (300 сек)
     current_time = int(time.time())
     c.execute('''SELECT i.id, i.party_code, g.name as sender_name, g.avatar as sender_avatar 
-                 FROM party_invites i
-                 JOIN global_users g ON i.sender_id = g.user_id
+                 FROM party_invites i JOIN global_users g ON i.sender_id = g.user_id
                  WHERE i.receiver_id=? AND (? - i.timestamp) < 300 LIMIT 1''', (user_id, current_time))
     invite = c.fetchone()
     conn.close()
-    if invite:
-        return {"has_invite": True, "invite": dict(invite)}
+    if invite: return {"has_invite": True, "invite": dict(invite)}
     return {"has_invite": False}
 
 @app.post("/api/invites/clear")
 def clear_invite(data: CodeOnly):
     conn = get_db()
     c = conn.cursor()
-    c.execute("DELETE FROM party_invites WHERE id=?", (data.code,)) # data.code здесь будет ID инвайта
+    c.execute("DELETE FROM party_invites WHERE id=?", (data.code,)) 
     conn.commit()
     conn.close()
     return {"status": "success"}

@@ -27,6 +27,8 @@ def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = get_db()
     c = conn.cursor()
+    
+    # Создаем базовые таблицы, если их нет
     c.execute('''CREATE TABLE IF NOT EXISTS parties (
                     code TEXT PRIMARY KEY, 
                     boss_hp INTEGER,
@@ -39,16 +41,22 @@ def init_db():
                     avatar TEXT
                  )''')
     
-    # Безопасное добавление колонок, включая Лидера и Активную игру
-    try:
-        c.execute("ALTER TABLE parties ADD COLUMN mega_progress INTEGER DEFAULT 0")
-        c.execute("ALTER TABLE parties ADD COLUMN mega_target INTEGER DEFAULT 36000")
-        c.execute("ALTER TABLE parties ADD COLUMN expedition_end INTEGER DEFAULT 0")
-        c.execute("ALTER TABLE parties ADD COLUMN expedition_score INTEGER DEFAULT 0")
-        c.execute("ALTER TABLE parties ADD COLUMN leader_id TEXT DEFAULT ''")
-        c.execute("ALTER TABLE parties ADD COLUMN active_game TEXT DEFAULT 'none'")
-    except Exception:
-        pass # Если колонки уже есть, просто игнорируем
+    # Железобетонное обновление базы: проверяем и добавляем КАЖДУЮ колонку отдельно
+    columns_to_add = [
+        ("parties", "mega_progress", "INTEGER DEFAULT 0"),
+        ("parties", "mega_target", "INTEGER DEFAULT 36000"),
+        ("parties", "expedition_end", "INTEGER DEFAULT 0"),
+        ("parties", "expedition_score", "INTEGER DEFAULT 0"),
+        ("parties", "leader_id", "TEXT DEFAULT ''"),
+        ("parties", "active_game", "TEXT DEFAULT 'none'")
+    ]
+    
+    for table, col_name, col_type in columns_to_add:
+        try:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}")
+        except sqlite3.OperationalError:
+            # Если колонка уже есть, база выдаст ошибку, мы ее просто игнорируем и идем к следующей
+            pass
 
     conn.commit()
     conn.close()
@@ -88,7 +96,6 @@ def create_party(data: PlayerData):
     conn = get_db()
     c = conn.cursor()
     code = str(random.randint(1000, 9999))
-    # Создатель становится Лидером (leader_id)
     c.execute("INSERT INTO parties (code, boss_hp, boss_max_hp, mega_progress, mega_target, expedition_end, expedition_score, leader_id, active_game) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", 
               (code, 10000, 10000, 0, 36000, 0, 0, data.user_id, 'none'))
     c.execute("DELETE FROM players WHERE user_id=?", (data.user_id,))
@@ -137,7 +144,6 @@ def get_party_status(code: str):
         "players": players
     }
 
-# НОВЫЙ РОУТ ДЛЯ УПРАВЛЕНИЯ ЗАПУСКОМ МИНИ-ИГР
 @app.post("/api/party/set_game")
 def set_game(data: SetGameData):
     conn = get_db()

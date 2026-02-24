@@ -28,78 +28,66 @@ def init_db():
     conn = get_db()
     c = conn.cursor()
     
+    # Существующие таблицы пати
     c.execute('''CREATE TABLE IF NOT EXISTS parties (
-                    code TEXT PRIMARY KEY, 
-                    boss_hp INTEGER,
-                    boss_max_hp INTEGER
+                    code TEXT PRIMARY KEY, boss_hp INTEGER, boss_max_hp INTEGER
                  )''')
     c.execute('''CREATE TABLE IF NOT EXISTS players (
-                    user_id TEXT PRIMARY KEY, 
-                    party_code TEXT, 
-                    name TEXT, 
-                    avatar TEXT
+                    user_id TEXT PRIMARY KEY, party_code TEXT, name TEXT, avatar TEXT
                  )''')
     
-    # Обновление таблиц для всех мини-игр и Гонки Яиц
     party_columns = [
-        ("mega_progress", "INTEGER DEFAULT 0"),
-        ("mega_target", "INTEGER DEFAULT 36000"),
-        ("expedition_end", "INTEGER DEFAULT 0"),
-        ("expedition_score", "INTEGER DEFAULT 0"),
-        ("leader_id", "TEXT DEFAULT ''"),
-        ("active_game", "TEXT DEFAULT 'none'")
+        ("mega_progress", "INTEGER DEFAULT 0"), ("mega_target", "INTEGER DEFAULT 36000"),
+        ("expedition_end", "INTEGER DEFAULT 0"), ("expedition_score", "INTEGER DEFAULT 0"),
+        ("leader_id", "TEXT DEFAULT ''"), ("active_game", "TEXT DEFAULT 'none'")
     ]
     for col, col_type in party_columns:
-        try:
-            c.execute(f"ALTER TABLE parties ADD COLUMN {col} {col_type}")
-        except sqlite3.OperationalError:
-            pass
+        try: c.execute(f"ALTER TABLE parties ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError: pass
 
-    # НОВЫЕ КОЛОНКИ ДЛЯ ИГРОКОВ (Для Гонки Яиц)
-    player_columns = [
-        ("boss_hp", "INTEGER DEFAULT 10000"),
-        ("egg_skin", "TEXT DEFAULT 'default'")
-    ]
+    player_columns = [("boss_hp", "INTEGER DEFAULT 10000"), ("egg_skin", "TEXT DEFAULT 'default'")]
     for col, col_type in player_columns:
-        try:
-            c.execute(f"ALTER TABLE players ADD COLUMN {col} {col_type}")
-        except sqlite3.OperationalError:
-            pass
+        try: c.execute(f"ALTER TABLE players ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError: pass
+
+    # НОВЫЕ ТАБЛИЦЫ ДЛЯ ДРУЗЕЙ И ПРОФИЛЕЙ
+    c.execute('''CREATE TABLE IF NOT EXISTS global_users (
+                    user_id TEXT PRIMARY KEY, name TEXT, avatar TEXT, 
+                    level INTEGER, earned INTEGER, hatched INTEGER
+                 )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS friends (
+                    user_id TEXT, friend_id TEXT, UNIQUE(user_id, friend_id)
+                 )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS party_invites (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sender_id TEXT, receiver_id TEXT, party_code TEXT, timestamp INTEGER
+                 )''')
 
     conn.commit()
     conn.close()
 
 init_db()
 
-class PlayerData(BaseModel):
-    user_id: str
-    name: str
-    avatar: str
-    egg_skin: str
+# --- МОДЕЛИ ДАННЫХ ---
+class PlayerData(BaseModel): user_id: str; name: str; avatar: str; egg_skin: str
+class JoinData(PlayerData): code: str
+class DamageData(BaseModel): code: str; user_id: str; damage: int
+class TimeData(BaseModel): code: str; seconds: int
+class CodeOnly(BaseModel): code: str
+class SetGameData(BaseModel): code: str; user_id: str; game_name: str
 
-class JoinData(PlayerData):
-    code: str
+class GlobalUserSync(BaseModel):
+    user_id: str; name: str; avatar: str; level: int; earned: int; hatched: int
 
-class DamageData(BaseModel):
-    code: str
-    user_id: str
-    damage: int
+class FriendAction(BaseModel):
+    user_id: str; friend_id: str
 
-class TimeData(BaseModel):
-    code: str
-    seconds: int
+class InviteData(BaseModel):
+    sender_id: str; receiver_id: str; party_code: str
 
-class CodeOnly(BaseModel):
-    code: str
-
-class SetGameData(BaseModel):
-    code: str
-    user_id: str
-    game_name: str
-
+# --- СТАРЫЕ РОУТЫ ПАТИ ---
 @app.get("/")
-def read_root():
-    return {"status": "Focus Hatcher Backend v3 - Egg Race Active!"}
+def read_root(): return {"status": "Focus Hatcher Backend v4 - Friends System Active!"}
 
 @app.post("/api/party/create")
 def create_party(data: PlayerData):
@@ -139,21 +127,14 @@ def get_party_status(code: str):
     if not party:
         conn.close()
         raise HTTPException(status_code=404, detail="Пати не найдено")
-    
-    # Теперь мы забираем и ХП каждого игрока, и скин его яйца
     c.execute("SELECT user_id, name, avatar, boss_hp, egg_skin FROM players WHERE party_code=?", (code,))
     players = [dict(row) for row in c.fetchall()]
     conn.close()
     return {
-        "boss_hp": party["boss_hp"],
-        "boss_max_hp": party["boss_max_hp"],
-        "mega_progress": party["mega_progress"],
-        "mega_target": party["mega_target"],
-        "expedition_end": party["expedition_end"],
-        "expedition_score": party["expedition_score"],
-        "leader_id": party["leader_id"],
-        "active_game": party["active_game"],
-        "players": players
+        "boss_hp": party["boss_hp"], "boss_max_hp": party["boss_max_hp"],
+        "mega_progress": party["mega_progress"], "mega_target": party["mega_target"],
+        "expedition_end": party["expedition_end"], "expedition_score": party["expedition_score"],
+        "leader_id": party["leader_id"], "active_game": party["active_game"], "players": players
     }
 
 @app.post("/api/party/set_game")
@@ -165,7 +146,6 @@ def set_game(data: SetGameData):
     if party and party["leader_id"] == data.user_id:
         c.execute("UPDATE parties SET active_game=? WHERE code=?", (data.game_name, data.code))
         if data.game_name == 'tap_boss':
-            # Сбрасываем ХП яйца ВСЕМ игрокам в этом пати
             c.execute("UPDATE players SET boss_hp=10000 WHERE party_code=?", (data.code,))
         conn.commit()
     conn.close()
@@ -175,7 +155,6 @@ def set_game(data: SetGameData):
 def deal_damage(data: DamageData):
     conn = get_db()
     c = conn.cursor()
-    # Урон теперь наносится ИНДИВИДУАЛЬНОМУ яйцу игрока
     c.execute("SELECT boss_hp FROM players WHERE user_id=? AND party_code=?", (data.user_id, data.code))
     player = c.fetchone()
     if not player:
@@ -216,12 +195,10 @@ def start_expedition(data: CodeOnly):
     c.execute("SELECT avatar FROM players WHERE party_code=?", (data.code,))
     players = c.fetchall()
     score = 0
-    legendary = ["unicorn", "dragon", "alien", "robot", "dino", "fireball", "god"]
-    rare = ["fox", "panda", "tiger", "lion", "cow", "pig", "monkey", "owl"]
     for p in players:
         av = p["avatar"]
-        if av in legendary: score += 10
-        elif av in rare: score += 3
+        if av in ["unicorn", "dragon", "alien", "robot", "dino", "fireball", "god"]: score += 10
+        elif av in ["fox", "panda", "tiger", "lion", "cow", "pig", "monkey", "owl"]: score += 3
         else: score += 1
     end_time = int(time.time()) + (4 * 3600)
     c.execute("UPDATE parties SET expedition_end=?, expedition_score=? WHERE code=?", (end_time, score, data.code))
@@ -243,6 +220,93 @@ def leave_party(data: PlayerData):
     conn = get_db()
     c = conn.cursor()
     c.execute("DELETE FROM players WHERE user_id=?", (data.user_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+
+# --- НОВЫЕ РОУТЫ: ДРУЗЬЯ И ПРОФИЛИ ---
+
+@app.post("/api/users/sync")
+def sync_global_user(data: GlobalUserSync):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('''INSERT INTO global_users (user_id, name, avatar, level, earned, hatched) 
+                 VALUES (?, ?, ?, ?, ?, ?) 
+                 ON CONFLICT(user_id) DO UPDATE SET 
+                 name=excluded.name, avatar=excluded.avatar, level=excluded.level, 
+                 earned=excluded.earned, hatched=excluded.hatched''', 
+              (data.user_id, data.name, data.avatar, data.level, data.earned, data.hatched))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.post("/api/friends/add")
+def add_friend(data: FriendAction):
+    if data.user_id == data.friend_id:
+        return {"status": "error", "detail": "Нельзя добавить себя"}
+    conn = get_db()
+    c = conn.cursor()
+    # Проверяем существует ли такой юзер
+    c.execute("SELECT * FROM global_users WHERE user_id=?", (data.friend_id,))
+    if not c.fetchone():
+        conn.close()
+        return {"status": "error", "detail": "Игрок не найден"}
+    
+    # Добавляем двустороннюю дружбу
+    try:
+        c.execute("INSERT INTO friends (user_id, friend_id) VALUES (?, ?)", (data.user_id, data.friend_id))
+        c.execute("INSERT INTO friends (user_id, friend_id) VALUES (?, ?)", (data.friend_id, data.user_id))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        pass # Уже в друзьях
+    conn.close()
+    return {"status": "success"}
+
+@app.get("/api/friends/list/{user_id}")
+def get_friends_list(user_id: str):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('''SELECT g.* FROM friends f 
+                 JOIN global_users g ON f.friend_id = g.user_id 
+                 WHERE f.user_id=?''', (user_id,))
+    friends = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return {"friends": friends}
+
+@app.post("/api/invites/send")
+def send_invite(data: InviteData):
+    conn = get_db()
+    c = conn.cursor()
+    # Удаляем старые инвайты от этого человека этому другу, чтобы не спамить
+    c.execute("DELETE FROM party_invites WHERE sender_id=? AND receiver_id=?", (data.sender_id, data.receiver_id))
+    c.execute("INSERT INTO party_invites (sender_id, receiver_id, party_code, timestamp) VALUES (?, ?, ?, ?)", 
+              (data.sender_id, data.receiver_id, data.party_code, int(time.time())))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.get("/api/invites/check/{user_id}")
+def check_invites(user_id: str):
+    conn = get_db()
+    c = conn.cursor()
+    # Ищем инвайты не старше 5 минут (300 сек)
+    current_time = int(time.time())
+    c.execute('''SELECT i.id, i.party_code, g.name as sender_name, g.avatar as sender_avatar 
+                 FROM party_invites i
+                 JOIN global_users g ON i.sender_id = g.user_id
+                 WHERE i.receiver_id=? AND (? - i.timestamp) < 300 LIMIT 1''', (user_id, current_time))
+    invite = c.fetchone()
+    conn.close()
+    if invite:
+        return {"has_invite": True, "invite": dict(invite)}
+    return {"has_invite": False}
+
+@app.post("/api/invites/clear")
+def clear_invite(data: CodeOnly):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM party_invites WHERE id=?", (data.code,)) # data.code здесь будет ID инвайта
     conn.commit()
     conn.close()
     return {"status": "success"}

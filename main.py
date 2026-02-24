@@ -39,14 +39,16 @@ def init_db():
                     avatar TEXT
                  )''')
     
-    # Безопасное добавление новых колонок для Мега-Яйца и Экспедиций
+    # Безопасное добавление колонок, включая Лидера и Активную игру
     try:
         c.execute("ALTER TABLE parties ADD COLUMN mega_progress INTEGER DEFAULT 0")
         c.execute("ALTER TABLE parties ADD COLUMN mega_target INTEGER DEFAULT 36000")
         c.execute("ALTER TABLE parties ADD COLUMN expedition_end INTEGER DEFAULT 0")
         c.execute("ALTER TABLE parties ADD COLUMN expedition_score INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE parties ADD COLUMN leader_id TEXT DEFAULT ''")
+        c.execute("ALTER TABLE parties ADD COLUMN active_game TEXT DEFAULT 'none'")
     except Exception:
-        pass # Колонки уже существуют
+        pass # Если колонки уже есть, просто игнорируем
 
     conn.commit()
     conn.close()
@@ -72,17 +74,23 @@ class TimeData(BaseModel):
 class CodeOnly(BaseModel):
     code: str
 
+class SetGameData(BaseModel):
+    code: str
+    user_id: str
+    game_name: str
+
 @app.get("/")
 def read_root():
-    return {"status": "Focus Hatcher Backend v2 - Mini Games Active!"}
+    return {"status": "Focus Hatcher Backend v2 - Multiplayer Sync Active!"}
 
 @app.post("/api/party/create")
 def create_party(data: PlayerData):
     conn = get_db()
     c = conn.cursor()
     code = str(random.randint(1000, 9999))
-    c.execute("INSERT INTO parties (code, boss_hp, boss_max_hp, mega_progress, mega_target, expedition_end, expedition_score) VALUES (?, ?, ?, ?, ?, ?, ?)", 
-              (code, 10000, 10000, 0, 36000, 0, 0))
+    # Создатель становится Лидером (leader_id)
+    c.execute("INSERT INTO parties (code, boss_hp, boss_max_hp, mega_progress, mega_target, expedition_end, expedition_score, leader_id, active_game) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", 
+              (code, 10000, 10000, 0, 36000, 0, 0, data.user_id, 'none'))
     c.execute("DELETE FROM players WHERE user_id=?", (data.user_id,))
     c.execute("INSERT INTO players (user_id, party_code, name, avatar) VALUES (?, ?, ?, ?)", 
               (data.user_id, code, data.name, data.avatar))
@@ -124,8 +132,25 @@ def get_party_status(code: str):
         "mega_target": party["mega_target"],
         "expedition_end": party["expedition_end"],
         "expedition_score": party["expedition_score"],
+        "leader_id": party["leader_id"],
+        "active_game": party["active_game"],
         "players": players
     }
+
+# НОВЫЙ РОУТ ДЛЯ УПРАВЛЕНИЯ ЗАПУСКОМ МИНИ-ИГР
+@app.post("/api/party/set_game")
+def set_game(data: SetGameData):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT leader_id FROM parties WHERE code=?", (data.code,))
+    party = c.fetchone()
+    if party and party["leader_id"] == data.user_id:
+        c.execute("UPDATE parties SET active_game=? WHERE code=?", (data.game_name, data.code))
+        if data.game_name == 'tap_boss':
+            c.execute("UPDATE parties SET boss_hp=boss_max_hp WHERE code=?", (data.code,))
+        conn.commit()
+    conn.close()
+    return {"status": "success"}
 
 @app.post("/api/party/damage")
 def deal_damage(data: DamageData):
@@ -159,7 +184,6 @@ def add_mega_egg_time(data: TimeData):
 def claim_mega_egg(data: CodeOnly):
     conn = get_db()
     c = conn.cursor()
-    # Сбрасываем яйцо, чтобы можно было фармить снова
     c.execute("UPDATE parties SET mega_progress=0 WHERE code=?", (data.code,))
     conn.commit()
     conn.close()
@@ -175,14 +199,13 @@ def start_expedition(data: CodeOnly):
     score = 0
     legendary = ["unicorn", "dragon", "alien", "robot", "dino", "fireball", "god"]
     rare = ["fox", "panda", "tiger", "lion", "cow", "pig", "monkey", "owl"]
-    
     for p in players:
         av = p["avatar"]
         if av in legendary: score += 10
         elif av in rare: score += 3
         else: score += 1
         
-    end_time = int(time.time()) + (4 * 3600) # 4 часа
+    end_time = int(time.time()) + (4 * 3600)
     c.execute("UPDATE parties SET expedition_end=?, expedition_score=? WHERE code=?", (end_time, score, data.code))
     conn.commit()
     conn.close()

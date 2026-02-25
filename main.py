@@ -43,13 +43,17 @@ def init_db():
         ("wolf_hp", "INTEGER DEFAULT 0"), ("wolf_max_hp", "INTEGER DEFAULT 0")
     ]
     for col, col_type in party_columns:
-        try: c.execute(f"ALTER TABLE parties ADD COLUMN {col} {col_type}")
-        except sqlite3.OperationalError: pass
+        try: 
+            c.execute(f"ALTER TABLE parties ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError: 
+            pass
 
     player_columns = [("boss_hp", "INTEGER DEFAULT 10000"), ("egg_skin", "TEXT DEFAULT 'default'")]
     for col, col_type in player_columns:
-        try: c.execute(f"ALTER TABLE players ADD COLUMN {col} {col_type}")
-        except sqlite3.OperationalError: pass
+        try: 
+            c.execute(f"ALTER TABLE players ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError: 
+            pass
 
     c.execute('''CREATE TABLE IF NOT EXISTS global_users (
                     user_id TEXT PRIMARY KEY, name TEXT, avatar TEXT, 
@@ -68,19 +72,57 @@ def init_db():
 
 init_db()
 
-class PlayerData(BaseModel): user_id: str; name: str; avatar: str; egg_skin: str
-class JoinData(PlayerData): code: str
-class DamageData(BaseModel): code: str; user_id: str; damage: int
-class TimeData(BaseModel): code: str; seconds: int
-class CodeOnly(BaseModel): code: str
-class SetGameData(BaseModel): code: str; user_id: str; game_name: str
-class GlobalUserSync(BaseModel): user_id: str; name: str; avatar: str; level: int; earned: int; hatched: int
-class FriendAction(BaseModel): user_id: str; friend_id: str
-class InviteData(BaseModel): sender_id: str; receiver_id: str; party_code: str
-class ExpeditionStartData(BaseModel): code: str; location: str
+# --- МОДЕЛИ ДАННЫХ ---
+class PlayerData(BaseModel): 
+    user_id: str
+    name: str
+    avatar: str
+    egg_skin: str
+
+class JoinData(PlayerData): 
+    code: str
+
+class DamageData(BaseModel): 
+    code: str
+    user_id: str
+    damage: int
+
+class TimeData(BaseModel): 
+    code: str
+    seconds: int
+
+class CodeOnly(BaseModel): 
+    code: str
+
+class SetGameData(BaseModel): 
+    code: str
+    user_id: str
+    game_name: str
+
+class GlobalUserSync(BaseModel): 
+    user_id: str
+    name: str
+    avatar: str
+    level: int
+    earned: int
+    hatched: int
+
+class FriendAction(BaseModel): 
+    user_id: str
+    friend_id: str
+
+class InviteData(BaseModel): 
+    sender_id: str
+    receiver_id: str
+    party_code: str
+
+class ExpeditionStartData(BaseModel): 
+    code: str
+    location: str
 
 @app.get("/")
-def read_root(): return {"status": "Focus Hatcher Backend v9 - Sync Fixed!"}
+def read_root(): 
+    return {"status": "Focus Hatcher Backend v9 - Sync Fixed!"}
 
 @app.post("/api/party/create")
 def create_party(data: PlayerData):
@@ -124,7 +166,6 @@ def get_party_status(code: str):
     players = [dict(row) for row in c.fetchall()]
     conn.close()
     
-    # ВОТ ОНО: Передаем серверное время клиенту для синхронизации таймеров
     return {
         "boss_hp": party["boss_hp"], "boss_max_hp": party["boss_max_hp"],
         "mega_progress": party["mega_progress"], "mega_target": party["mega_target"],
@@ -208,23 +249,31 @@ def start_expedition(data: ExpeditionStartData):
     c.execute("SELECT avatar FROM players WHERE party_code=?", (data.code,))
     players = c.fetchall()
     
-    score = 0; farm_count = 0; pred_count = 0
+    score = 0
+    farm_count = 0
+    pred_count = 0
+    
     for p in players:
         av = p["avatar"]
-        if av in ["unicorn", "dragon", "alien", "robot", "dino", "fireball", "god"]: score += 10
-        elif av in ["fox", "panda", "tiger", "lion", "cow", "pig", "monkey", "owl"]: score += 3
-        else: score += 1
+        if av in ["unicorn", "dragon", "alien", "robot", "dino", "fireball", "god"]: 
+            score += 10
+        elif av in ["fox", "panda", "tiger", "lion", "cow", "pig", "monkey", "owl"]: 
+            score += 3
+        else: 
+            score += 1
         
         if av in ["cow", "pig", "duck"]: farm_count += 1
         if av in ["kitten", "tiger", "lion", "fox"]: pred_count += 1
 
-    if farm_count >= 3: score = int(score * 1.5)
+    if farm_count >= 3: 
+        score = int(score * 1.5)
 
     base_time = 5 * 60
     if data.location == 'mountains': base_time = 15 * 60
     elif data.location == 'space': base_time = 25 * 60
 
-    if pred_count >= 2: base_time = int(base_time * 0.85)
+    if pred_count >= 2: 
+        base_time = int(base_time * 0.85)
 
     end_time = int(time.time()) + base_time
 
@@ -283,12 +332,15 @@ def add_friend(data: FriendAction):
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT * FROM global_users WHERE user_id=?", (data.friend_id,))
-    if not c.fetchone(): return {"status": "error", "detail": "Игрок не найден"}
+    if not c.fetchone(): 
+        conn.close()
+        return {"status": "error", "detail": "Игрок не найден"}
     try:
         c.execute("INSERT INTO friends (user_id, friend_id) VALUES (?, ?)", (data.user_id, data.friend_id))
         c.execute("INSERT INTO friends (user_id, friend_id) VALUES (?, ?)", (data.friend_id, data.user_id))
         conn.commit()
-    except sqlite3.IntegrityError: pass 
+    except sqlite3.IntegrityError: 
+        pass 
     conn.close()
     return {"status": "success"}
 
@@ -321,7 +373,8 @@ def check_invites(user_id: str):
                  WHERE i.receiver_id=? AND (? - i.timestamp) < 300 LIMIT 1''', (user_id, int(time.time())))
     invite = c.fetchone()
     conn.close()
-    if invite: return {"has_invite": True, "invite": dict(invite)}
+    if invite: 
+        return {"has_invite": True, "invite": dict(invite)}
     return {"has_invite": False}
 
 @app.post("/api/invites/clear")

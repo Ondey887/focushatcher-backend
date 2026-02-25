@@ -80,7 +80,7 @@ class InviteData(BaseModel): sender_id: str; receiver_id: str; party_code: str
 class ExpeditionStartData(BaseModel): code: str; location: str
 
 @app.get("/")
-def read_root(): return {"status": "Focus Hatcher Backend Active!"}
+def read_root(): return {"status": "Focus Hatcher Backend v11 - Expedition State Fixed!"}
 
 @app.post("/api/party/create")
 def create_party(data: PlayerData):
@@ -120,6 +120,14 @@ def get_party_status(code: str):
     if not party:
         conn.close()
         raise HTTPException(status_code=404, detail="Пати не найдено")
+    
+    # САМОЛЕЧЕНИЕ БАЗЫ ДАННЫХ ОТ ЗАСТРЯВШИХ ВОЛКОВ
+    w_hp = party["wolf_hp"]
+    if party["expedition_end"] == 0 and w_hp > 0:
+        c.execute("UPDATE parties SET wolf_hp=0 WHERE code=?", (code,))
+        conn.commit()
+        w_hp = 0
+
     c.execute("SELECT user_id, name, avatar, boss_hp, egg_skin FROM players WHERE party_code=?", (code,))
     players = [dict(row) for row in c.fetchall()]
     conn.close()
@@ -128,7 +136,7 @@ def get_party_status(code: str):
         "boss_hp": party["boss_hp"], "boss_max_hp": party["boss_max_hp"],
         "mega_progress": party["mega_progress"], "mega_target": party["mega_target"],
         "expedition_end": party["expedition_end"], "expedition_score": party["expedition_score"],
-        "expedition_location": party["expedition_location"], "wolf_hp": party["wolf_hp"], "wolf_max_hp": party["wolf_max_hp"],
+        "expedition_location": party["expedition_location"], "wolf_hp": w_hp, "wolf_max_hp": party["wolf_max_hp"],
         "leader_id": party["leader_id"], "active_game": party["active_game"], "players": players,
         "server_time": int(time.time())
     }
@@ -236,7 +244,7 @@ def start_expedition(data: ExpeditionStartData):
     end_time = int(time.time()) + base_time
 
     wolf_hp = 0
-    if random.random() < 0.20:
+    if random.random() < 0.15:
         wolf_hp = len(players) * 20 
     
     c.execute("UPDATE parties SET expedition_end=?, expedition_score=?, expedition_location=?, wolf_hp=?, wolf_max_hp=? WHERE code=?", 

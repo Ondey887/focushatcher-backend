@@ -80,7 +80,7 @@ class InviteData(BaseModel): sender_id: str; receiver_id: str; party_code: str
 class ExpeditionStartData(BaseModel): code: str; location: str
 
 @app.get("/")
-def read_root(): return {"status": "Focus Hatcher Backend v10 - Timezone Fix"}
+def read_root(): return {"status": "Focus Hatcher Backend Active!"}
 
 @app.post("/api/party/create")
 def create_party(data: PlayerData):
@@ -124,7 +124,6 @@ def get_party_status(code: str):
     players = [dict(row) for row in c.fetchall()]
     conn.close()
     
-    # КРИТИЧЕСКИ ВАЖНО: передаем серверное время для таймеров!
     return {
         "boss_hp": party["boss_hp"], "boss_max_hp": party["boss_max_hp"],
         "mega_progress": party["mega_progress"], "mega_target": party["mega_target"],
@@ -236,9 +235,8 @@ def start_expedition(data: ExpeditionStartData):
 
     end_time = int(time.time()) + base_time
 
-    # Шанс волка снижен до 15%, здоровье снижено
     wolf_hp = 0
-    if random.random() < 0.15:
+    if random.random() < 0.20:
         wolf_hp = len(players) * 20 
     
     c.execute("UPDATE parties SET expedition_end=?, expedition_score=?, expedition_location=?, wolf_hp=?, wolf_max_hp=? WHERE code=?", 

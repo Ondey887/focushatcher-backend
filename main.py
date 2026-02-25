@@ -80,7 +80,7 @@ class InviteData(BaseModel): sender_id: str; receiver_id: str; party_code: str
 class ExpeditionStartData(BaseModel): code: str; location: str
 
 @app.get("/")
-def read_root(): return {"status": "Focus Hatcher Backend v7 - Perfect State Clean!"}
+def read_root(): return {"status": "Focus Hatcher Backend v8 - Fast Expeditions!"}
 
 @app.post("/api/party/create")
 def create_party(data: PlayerData):
@@ -139,14 +139,11 @@ def set_game(data: SetGameData):
     party = c.fetchone()
     if party and party["leader_id"] == data.user_id:
         c.execute("UPDATE parties SET active_game=? WHERE code=?", (data.game_name, data.code))
-        
-        # Если игра отменяется - СЖИГАЕМ ПРОГРЕСС
         if data.game_name == 'none':
             c.execute("UPDATE parties SET expedition_end=0, expedition_score=0, wolf_hp=0 WHERE code=?", (data.code,))
             c.execute("UPDATE players SET boss_hp=10000 WHERE party_code=?", (data.code,))
         elif data.game_name == 'tap_boss':
             c.execute("UPDATE players SET boss_hp=10000 WHERE party_code=?", (data.code,))
-            
         conn.commit()
     conn.close()
     return {"status": "success"}
@@ -220,9 +217,10 @@ def start_expedition(data: ExpeditionStartData):
 
     if farm_count >= 3: score = int(score * 1.5)
 
-    base_time = 25 * 60
-    if data.location == 'mountains': base_time = 60 * 60
-    elif data.location == 'space': base_time = 120 * 60
+    # НОВЫЕ ТАЙМИНГИ: 5, 15, 25 минут
+    base_time = 5 * 60
+    if data.location == 'mountains': base_time = 15 * 60
+    elif data.location == 'space': base_time = 25 * 60
 
     if pred_count >= 2: base_time = int(base_time * 0.85)
 
@@ -251,20 +249,14 @@ def claim_expedition(data: CodeOnly):
 def leave_party(data: PlayerData):
     conn = get_db()
     c = conn.cursor()
-    
-    # Проверяем, Лидер ли выходит
     c.execute("SELECT code, leader_id FROM parties WHERE code=(SELECT party_code FROM players WHERE user_id=?)", (data.user_id,))
     party = c.fetchone()
-    
     if party and party["leader_id"] == data.user_id:
-        # Лидер вышел -> Удаляем пати полностью
         party_code = party["code"]
         c.execute("DELETE FROM players WHERE party_code=?", (party_code,))
         c.execute("DELETE FROM parties WHERE code=?", (party_code,))
     else:
-        # Обычный игрок вышел
         c.execute("DELETE FROM players WHERE user_id=?", (data.user_id,))
-        
     conn.commit()
     conn.close()
     return {"status": "success"}

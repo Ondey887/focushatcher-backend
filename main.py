@@ -40,7 +40,7 @@ def init_db():
         ("expedition_end", "INTEGER DEFAULT 0"), ("expedition_score", "INTEGER DEFAULT 0"),
         ("leader_id", "TEXT DEFAULT ''"), ("active_game", "TEXT DEFAULT 'none'"),
         ("expedition_location", "TEXT DEFAULT 'forest'"),
-        ("wolf_hp", "INTEGER DEFAULT 0"), ("wolf_max_hp", "INTEGER DEFAULT 0") # НОВЫЕ КОЛОНКИ ДЛЯ ВОЛКА
+        ("wolf_hp", "INTEGER DEFAULT 0"), ("wolf_max_hp", "INTEGER DEFAULT 0")
     ]
     for col, col_type in party_columns:
         try: c.execute(f"ALTER TABLE parties ADD COLUMN {col} {col_type}")
@@ -68,7 +68,6 @@ def init_db():
 
 init_db()
 
-# --- МОДЕЛИ ДАННЫХ ---
 class PlayerData(BaseModel): user_id: str; name: str; avatar: str; egg_skin: str
 class JoinData(PlayerData): code: str
 class DamageData(BaseModel): code: str; user_id: str; damage: int
@@ -81,7 +80,7 @@ class InviteData(BaseModel): sender_id: str; receiver_id: str; party_code: str
 class ExpeditionStartData(BaseModel): code: str; location: str
 
 @app.get("/")
-def read_root(): return {"status": "Focus Hatcher Backend v6 - Wolf Event Active!"}
+def read_root(): return {"status": "Focus Hatcher Backend v7 - Perfect State Clean!"}
 
 @app.post("/api/party/create")
 def create_party(data: PlayerData):
@@ -140,8 +139,14 @@ def set_game(data: SetGameData):
     party = c.fetchone()
     if party and party["leader_id"] == data.user_id:
         c.execute("UPDATE parties SET active_game=? WHERE code=?", (data.game_name, data.code))
-        if data.game_name == 'tap_boss':
+        
+        # Если игра отменяется - СЖИГАЕМ ПРОГРЕСС
+        if data.game_name == 'none':
+            c.execute("UPDATE parties SET expedition_end=0, expedition_score=0, wolf_hp=0 WHERE code=?", (data.code,))
             c.execute("UPDATE players SET boss_hp=10000 WHERE party_code=?", (data.code,))
+        elif data.game_name == 'tap_boss':
+            c.execute("UPDATE players SET boss_hp=10000 WHERE party_code=?", (data.code,))
+            
         conn.commit()
     conn.close()
     return {"status": "success"}
@@ -161,7 +166,6 @@ def deal_damage(data: DamageData):
     conn.close()
     return {"status": "success", "new_hp": new_hp}
 
-# НОВЫЙ УРОН ПО ВОЛКУ В ЭКСПЕДИЦИИ
 @app.post("/api/party/expedition/wolf_damage")
 def wolf_damage(data: DamageData):
     conn = get_db()
@@ -224,10 +228,9 @@ def start_expedition(data: ExpeditionStartData):
 
     end_time = int(time.time()) + base_time
 
-    # 40% шанс на нападение волка при старте
     wolf_hp = 0
     if random.random() < 0.40:
-        wolf_hp = len(players) * 50 # По 50 кликов на каждого игрока
+        wolf_hp = len(players) * 50 
     
     c.execute("UPDATE parties SET expedition_end=?, expedition_score=?, expedition_location=?, wolf_hp=?, wolf_max_hp=? WHERE code=?", 
               (end_time, score, data.location, wolf_hp, wolf_hp, data.code))
@@ -248,7 +251,20 @@ def claim_expedition(data: CodeOnly):
 def leave_party(data: PlayerData):
     conn = get_db()
     c = conn.cursor()
-    c.execute("DELETE FROM players WHERE user_id=?", (data.user_id,))
+    
+    # Проверяем, Лидер ли выходит
+    c.execute("SELECT code, leader_id FROM parties WHERE code=(SELECT party_code FROM players WHERE user_id=?)", (data.user_id,))
+    party = c.fetchone()
+    
+    if party and party["leader_id"] == data.user_id:
+        # Лидер вышел -> Удаляем пати полностью
+        party_code = party["code"]
+        c.execute("DELETE FROM players WHERE party_code=?", (party_code,))
+        c.execute("DELETE FROM parties WHERE code=?", (party_code,))
+    else:
+        # Обычный игрок вышел
+        c.execute("DELETE FROM players WHERE user_id=?", (data.user_id,))
+        
     conn.commit()
     conn.close()
     return {"status": "success"}

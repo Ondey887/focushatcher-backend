@@ -80,7 +80,7 @@ class InviteData(BaseModel): sender_id: str; receiver_id: str; party_code: str
 class ExpeditionStartData(BaseModel): code: str; location: str
 
 @app.get("/")
-def read_root(): return {"status": "Focus Hatcher Backend v8 - Fast Expeditions!"}
+def read_root(): return {"status": "Focus Hatcher Backend v9 - Sync Fixed!"}
 
 @app.post("/api/party/create")
 def create_party(data: PlayerData):
@@ -123,12 +123,15 @@ def get_party_status(code: str):
     c.execute("SELECT user_id, name, avatar, boss_hp, egg_skin FROM players WHERE party_code=?", (code,))
     players = [dict(row) for row in c.fetchall()]
     conn.close()
+    
+    # ВОТ ОНО: Передаем серверное время клиенту для синхронизации таймеров
     return {
         "boss_hp": party["boss_hp"], "boss_max_hp": party["boss_max_hp"],
         "mega_progress": party["mega_progress"], "mega_target": party["mega_target"],
         "expedition_end": party["expedition_end"], "expedition_score": party["expedition_score"],
         "expedition_location": party["expedition_location"], "wolf_hp": party["wolf_hp"], "wolf_max_hp": party["wolf_max_hp"],
-        "leader_id": party["leader_id"], "active_game": party["active_game"], "players": players
+        "leader_id": party["leader_id"], "active_game": party["active_game"], "players": players,
+        "server_time": int(time.time())
     }
 
 @app.post("/api/party/set_game")
@@ -217,7 +220,6 @@ def start_expedition(data: ExpeditionStartData):
 
     if farm_count >= 3: score = int(score * 1.5)
 
-    # НОВЫЕ ТАЙМИНГИ: 5, 15, 25 минут
     base_time = 5 * 60
     if data.location == 'mountains': base_time = 15 * 60
     elif data.location == 'space': base_time = 25 * 60

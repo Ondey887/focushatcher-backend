@@ -43,17 +43,13 @@ def init_db():
         ("wolf_hp", "INTEGER DEFAULT 0"), ("wolf_max_hp", "INTEGER DEFAULT 0")
     ]
     for col, col_type in party_columns:
-        try: 
-            c.execute(f"ALTER TABLE parties ADD COLUMN {col} {col_type}")
-        except sqlite3.OperationalError: 
-            pass
+        try: c.execute(f"ALTER TABLE parties ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError: pass
 
     player_columns = [("boss_hp", "INTEGER DEFAULT 10000"), ("egg_skin", "TEXT DEFAULT 'default'")]
     for col, col_type in player_columns:
-        try: 
-            c.execute(f"ALTER TABLE players ADD COLUMN {col} {col_type}")
-        except sqlite3.OperationalError: 
-            pass
+        try: c.execute(f"ALTER TABLE players ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError: pass
 
     c.execute('''CREATE TABLE IF NOT EXISTS global_users (
                     user_id TEXT PRIMARY KEY, name TEXT, avatar TEXT, 
@@ -72,57 +68,19 @@ def init_db():
 
 init_db()
 
-# --- МОДЕЛИ ДАННЫХ ---
-class PlayerData(BaseModel): 
-    user_id: str
-    name: str
-    avatar: str
-    egg_skin: str
-
-class JoinData(PlayerData): 
-    code: str
-
-class DamageData(BaseModel): 
-    code: str
-    user_id: str
-    damage: int
-
-class TimeData(BaseModel): 
-    code: str
-    seconds: int
-
-class CodeOnly(BaseModel): 
-    code: str
-
-class SetGameData(BaseModel): 
-    code: str
-    user_id: str
-    game_name: str
-
-class GlobalUserSync(BaseModel): 
-    user_id: str
-    name: str
-    avatar: str
-    level: int
-    earned: int
-    hatched: int
-
-class FriendAction(BaseModel): 
-    user_id: str
-    friend_id: str
-
-class InviteData(BaseModel): 
-    sender_id: str
-    receiver_id: str
-    party_code: str
-
-class ExpeditionStartData(BaseModel): 
-    code: str
-    location: str
+class PlayerData(BaseModel): user_id: str; name: str; avatar: str; egg_skin: str
+class JoinData(PlayerData): code: str
+class DamageData(BaseModel): code: str; user_id: str; damage: int
+class TimeData(BaseModel): code: str; seconds: int
+class CodeOnly(BaseModel): code: str
+class SetGameData(BaseModel): code: str; user_id: str; game_name: str
+class GlobalUserSync(BaseModel): user_id: str; name: str; avatar: str; level: int; earned: int; hatched: int
+class FriendAction(BaseModel): user_id: str; friend_id: str
+class InviteData(BaseModel): sender_id: str; receiver_id: str; party_code: str
+class ExpeditionStartData(BaseModel): code: str; location: str
 
 @app.get("/")
-def read_root(): 
-    return {"status": "Focus Hatcher Backend v9 - Sync Fixed!"}
+def read_root(): return {"status": "Focus Hatcher Backend v10 - Timezone Fix"}
 
 @app.post("/api/party/create")
 def create_party(data: PlayerData):
@@ -166,6 +124,7 @@ def get_party_status(code: str):
     players = [dict(row) for row in c.fetchall()]
     conn.close()
     
+    # КРИТИЧЕСКИ ВАЖНО: передаем серверное время для таймеров!
     return {
         "boss_hp": party["boss_hp"], "boss_max_hp": party["boss_max_hp"],
         "mega_progress": party["mega_progress"], "mega_target": party["mega_target"],
@@ -277,9 +236,10 @@ def start_expedition(data: ExpeditionStartData):
 
     end_time = int(time.time()) + base_time
 
+    # Шанс волка снижен до 15%, здоровье снижено
     wolf_hp = 0
-    if random.random() < 0.40:
-        wolf_hp = len(players) * 50 
+    if random.random() < 0.15:
+        wolf_hp = len(players) * 20 
     
     c.execute("UPDATE parties SET expedition_end=?, expedition_score=?, expedition_location=?, wolf_hp=?, wolf_max_hp=? WHERE code=?", 
               (end_time, score, data.location, wolf_hp, wolf_hp, data.code))

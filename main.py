@@ -40,7 +40,8 @@ def init_db():
         ("expedition_end", "INTEGER DEFAULT 0"), ("expedition_score", "INTEGER DEFAULT 0"),
         ("leader_id", "TEXT DEFAULT ''"), ("active_game", "TEXT DEFAULT 'none'"),
         ("expedition_location", "TEXT DEFAULT 'forest'"),
-        ("wolf_hp", "INTEGER DEFAULT 0"), ("wolf_max_hp", "INTEGER DEFAULT 0")
+        ("wolf_hp", "INTEGER DEFAULT 0"), ("wolf_max_hp", "INTEGER DEFAULT 0"),
+        ("mega_radar", "INTEGER DEFAULT 0")
     ]
     for col, col_type in party_columns:
         try: c.execute(f"ALTER TABLE parties ADD COLUMN {col} {col_type}")
@@ -80,15 +81,15 @@ class InviteData(BaseModel): sender_id: str; receiver_id: str; party_code: str
 class ExpeditionStartData(BaseModel): code: str; location: str
 
 @app.get("/")
-def read_root(): return {"status": "Focus Hatcher Backend v11 - Expedition State Fixed!"}
+def read_root(): return {"status": "Focus Hatcher Backend v12 - Mega Radar!"}
 
 @app.post("/api/party/create")
 def create_party(data: PlayerData):
     conn = get_db()
     c = conn.cursor()
     code = str(random.randint(1000, 9999))
-    c.execute("INSERT INTO parties (code, boss_hp, boss_max_hp, mega_progress, mega_target, expedition_end, expedition_score, leader_id, active_game, expedition_location, wolf_hp, wolf_max_hp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 
-              (code, 10000, 10000, 0, 36000, 0, 0, data.user_id, 'none', 'forest', 0, 0))
+    c.execute("INSERT INTO parties (code, boss_hp, boss_max_hp, mega_progress, mega_target, expedition_end, expedition_score, leader_id, active_game, expedition_location, wolf_hp, wolf_max_hp, mega_radar) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 
+              (code, 10000, 10000, 0, 36000, 0, 0, data.user_id, 'none', 'forest', 0, 0, 0))
     c.execute("DELETE FROM players WHERE user_id=?", (data.user_id,))
     c.execute("INSERT INTO players (user_id, party_code, name, avatar, boss_hp, egg_skin) VALUES (?, ?, ?, ?, ?, ?)", 
               (data.user_id, code, data.name, data.avatar, 10000, data.egg_skin))
@@ -121,7 +122,6 @@ def get_party_status(code: str):
         conn.close()
         raise HTTPException(status_code=404, detail="Пати не найдено")
     
-    # САМОЛЕЧЕНИЕ БАЗЫ ДАННЫХ ОТ ЗАСТРЯВШИХ ВОЛКОВ
     w_hp = party["wolf_hp"]
     if party["expedition_end"] == 0 and w_hp > 0:
         c.execute("UPDATE parties SET wolf_hp=0 WHERE code=?", (code,))
@@ -137,6 +137,7 @@ def get_party_status(code: str):
         "mega_progress": party["mega_progress"], "mega_target": party["mega_target"],
         "expedition_end": party["expedition_end"], "expedition_score": party["expedition_score"],
         "expedition_location": party["expedition_location"], "wolf_hp": w_hp, "wolf_max_hp": party["wolf_max_hp"],
+        "mega_radar": party["mega_radar"],
         "leader_id": party["leader_id"], "active_game": party["active_game"], "players": players,
         "server_time": int(time.time())
     }
@@ -150,11 +151,20 @@ def set_game(data: SetGameData):
     if party and party["leader_id"] == data.user_id:
         c.execute("UPDATE parties SET active_game=? WHERE code=?", (data.game_name, data.code))
         if data.game_name == 'none':
-            c.execute("UPDATE parties SET expedition_end=0, expedition_score=0, wolf_hp=0 WHERE code=?", (data.code,))
+            c.execute("UPDATE parties SET expedition_end=0, expedition_score=0, wolf_hp=0, mega_radar=0 WHERE code=?", (data.code,))
             c.execute("UPDATE players SET boss_hp=10000 WHERE party_code=?", (data.code,))
         elif data.game_name == 'tap_boss':
             c.execute("UPDATE players SET boss_hp=10000 WHERE party_code=?", (data.code,))
         conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.post("/api/party/radar")
+def activate_radar(data: CodeOnly):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE parties SET mega_radar=1 WHERE code=?", (data.code,))
+    conn.commit()
     conn.close()
     return {"status": "success"}
 
@@ -257,7 +267,7 @@ def start_expedition(data: ExpeditionStartData):
 def claim_expedition(data: CodeOnly):
     conn = get_db()
     c = conn.cursor()
-    c.execute("UPDATE parties SET expedition_end=0, expedition_score=0, wolf_hp=0 WHERE code=?", (data.code,))
+    c.execute("UPDATE parties SET expedition_end=0, expedition_score=0, wolf_hp=0, mega_radar=0 WHERE code=?", (data.code,))
     conn.commit()
     conn.close()
     return {"status": "success"}

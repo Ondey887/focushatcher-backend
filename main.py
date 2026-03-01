@@ -9,6 +9,7 @@ import requests
 
 # БЕРЕМ ТОКЕН ИЗ СЕКРЕТОВ AMVERA (Переменных окружения)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "superadmin123")
 
 app = FastAPI()
 
@@ -70,7 +71,7 @@ def init_db():
                     sender_id TEXT, receiver_id TEXT, party_code TEXT, timestamp INTEGER
                  )''')
 
-    # === НОВЫЕ ТАБЛИЦЫ ДЛЯ ПРОМОКОДОВ ===
+    # === ТАБЛИЦЫ ДЛЯ ПРОМОКОДОВ ===
     c.execute('''CREATE TABLE IF NOT EXISTS promo_codes (
                     code TEXT PRIMARY KEY, type TEXT, val INTEGER, max_uses INTEGER, uses INTEGER DEFAULT 0
                  )''')
@@ -78,11 +79,11 @@ def init_db():
                     user_id TEXT, code TEXT, UNIQUE(user_id, code)
                  )''')
                  
-    # Заполняем базовые промокоды, если таблица пустая
+    # Заполняем базовые промокоды (один раз)
     c.execute("SELECT COUNT(*) FROM promo_codes")
     if c.fetchone()[0] == 0:
-        c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('START2026', 'money', 1000, 100000)")
-        c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('SPEED', 'speed', 5, 100000)")
+        c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('START2026', 'money', 1000, 0)") # 0 = безлимит
+        c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('SPEED', 'speed', 5, 0)")
         c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('SECRET', 'stars', 10, 100)")
         c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('JOKER', 'joker', 2, 50)")
 
@@ -104,10 +105,67 @@ class ExpeditionStartData(BaseModel): code: str; location: str
 class InvoiceData(BaseModel): amount: int; user_id: str
 class PromoRequest(BaseModel): user_id: str; code: str
 
-@app.get("/")
-def read_root(): return {"status": "Focus Hatcher Backend v15 - Secure Promos!"}
+# Модель для админки
+class AdminPromoCreate(BaseModel):
+    password: str
+    code: str
+    type: str
+    val: int
+    max_uses: int
 
-# --- ПОКУПКА ЗВЕЗД ---
+@app.get("/")
+def read_root(): return {"status": "Focus Hatcher Backend v16 - Secure Admin!"}
+
+# --- АДМИН-ПАНЕЛЬ: СОЗДАНИЕ ПРОМОКОДА ---
+@app.post("/api/admin/promo/create")
+def admin_create_promo(data: AdminPromoCreate):
+    if data.password != ADMIN_PASSWORD:
+        return {"status": "error", "detail": "Неверный пароль!"}
+        
+    conn = get_db()
+    c = conn.cursor()
+    code_upper = data.code.upper().strip()
+    
+    c.execute("SELECT * FROM promo_codes WHERE code=?", (code_upper,))
+    if c.fetchone():
+        conn.close()
+        return {"status": "error", "detail": "Код уже существует!"}
+        
+    c.execute("INSERT INTO promo_codes (code, type, val, max_uses, uses) VALUES (?, ?, ?, ?, 0)",
+              (code_upper, data.type, data.val, data.max_uses))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+# --- АКТИВАЦИЯ ПРОМОКОДА ---
+@app.post("/api/promo/activate")
+def activate_promo(data: PromoRequest):
+    conn = get_db()
+    c = conn.cursor()
+    code_upper = data.code.upper()
+    
+    c.execute("SELECT * FROM user_promos WHERE user_id=? AND code=?", (data.user_id, code_upper))
+    if c.fetchone():
+        conn.close()
+        return {"status": "error", "detail": "Уже активирован!"}
+    
+    c.execute("SELECT * FROM promo_codes WHERE code=?", (code_upper,))
+    promo = c.fetchone()
+    if not promo:
+        conn.close()
+        return {"status": "error", "detail": "Код не найден"}
+        
+    if promo["max_uses"] > 0 and promo["uses"] >= promo["max_uses"]:
+        conn.close()
+        return {"status": "error", "detail": "Лимит активаций исчерпан!"}
+        
+    c.execute("UPDATE promo_codes SET uses = uses + 1 WHERE code=?", (code_upper,))
+    c.execute("INSERT INTO user_promos (user_id, code) VALUES (?, ?)", (data.user_id, code_upper))
+    conn.commit()
+    conn.close()
+    
+    return {"status": "success", "type": promo["type"], "val": promo["val"]}
+
 @app.post("/api/payment/invoice")
 def create_invoice(data: InvoiceData):
     if not BOT_TOKEN:
@@ -131,40 +189,6 @@ def create_invoice(data: InvoiceData):
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
-# --- АКТИВАЦИЯ ПРОМОКОДА ---
-@app.post("/api/promo/activate")
-def activate_promo(data: PromoRequest):
-    conn = get_db()
-    c = conn.cursor()
-    code_upper = data.code.upper()
-    
-    # 1. Проверяем, не вводил ли игрок этот код ранее
-    c.execute("SELECT * FROM user_promos WHERE user_id=? AND code=?", (data.user_id, code_upper))
-    if c.fetchone():
-        conn.close()
-        return {"status": "error", "detail": "Уже активирован!"}
-    
-    # 2. Ищем код в базе
-    c.execute("SELECT * FROM promo_codes WHERE code=?", (code_upper,))
-    promo = c.fetchone()
-    if not promo:
-        conn.close()
-        return {"status": "error", "detail": "Код не найден"}
-        
-    # 3. Проверяем лимит использований
-    if promo["max_uses"] > 0 and promo["uses"] >= promo["max_uses"]:
-        conn.close()
-        return {"status": "error", "detail": "Лимит активаций исчерпан!"}
-        
-    # 4. Начисляем: увеличиваем счетчик кода и записываем игрока
-    c.execute("UPDATE promo_codes SET uses = uses + 1 WHERE code=?", (code_upper,))
-    c.execute("INSERT INTO user_promos (user_id, code) VALUES (?, ?)", (data.user_id, code_upper))
-    conn.commit()
-    conn.close()
-    
-    return {"status": "success", "type": promo["type"], "val": promo["val"]}
-
-# --- ПАТИ ---
 @app.post("/api/party/create")
 def create_party(data: PlayerData):
     conn = get_db()

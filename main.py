@@ -7,10 +7,8 @@ import os
 import time
 import requests
 
-# ==========================================
-# ВАЖНО: ВСТАВЬ СЮДА СВОЙ ТОКЕН ОТ BOTFATHER
-# ==========================================
-BOT_TOKEN = "8435419832:AAGW0kWkUjYJiR--pLkBoDPcLyHVRdurYtw"
+# БЕРЕМ ТОКЕН ИЗ СЕКРЕТОВ AMVERA (Переменных окружения)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 app = FastAPI()
 
@@ -88,18 +86,21 @@ class ExpeditionStartData(BaseModel): code: str; location: str
 class InvoiceData(BaseModel): amount: int; user_id: str
 
 @app.get("/")
-def read_root(): return {"status": "Focus Hatcher Backend v13 - Telegram Stars!"}
+def read_root(): return {"status": "Focus Hatcher Backend v14 - Secure Stars!"}
 
-# --- НОВЫЙ РОУТ ДЛЯ ГЕНЕРАЦИИ ЧЕКА НА ЗВЕЗДЫ ---
+# --- ГЕНЕРАЦИЯ ЧЕКА НА ЗВЕЗДЫ ---
 @app.post("/api/payment/invoice")
 def create_invoice(data: InvoiceData):
+    if not BOT_TOKEN:
+        return {"status": "error", "detail": "Сервер не настроен (нет токена)"}
+        
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/createInvoiceLink"
     payload = {
         "title": f"Покупка {data.amount} ⭐️",
         "description": "Пополнение баланса Звезд в Focus Hatcher",
         "payload": f"stars_{data.amount}_{data.user_id}_{int(time.time())}",
-        "provider_token": "", # Для Звезд токен провайдера должен быть пустым
-        "currency": "XTR", # Официальный код валюты Telegram Stars
+        "provider_token": "", 
+        "currency": "XTR", 
         "prices": [{"label": "Stars", "amount": data.amount}]
     }
     try:

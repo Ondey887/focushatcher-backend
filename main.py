@@ -5,6 +5,12 @@ import sqlite3
 import random
 import os
 import time
+import requests
+
+# ==========================================
+# ВАЖНО: ВСТАВЬ СЮДА СВОЙ ТОКЕН ОТ BOTFATHER
+# ==========================================
+BOT_TOKEN = "8435419832:AAGW0kWkUjYJiR--pLkBoDPcLyHVRdurYtw"
 
 app = FastAPI()
 
@@ -79,9 +85,31 @@ class GlobalUserSync(BaseModel): user_id: str; name: str; avatar: str; level: in
 class FriendAction(BaseModel): user_id: str; friend_id: str
 class InviteData(BaseModel): sender_id: str; receiver_id: str; party_code: str
 class ExpeditionStartData(BaseModel): code: str; location: str
+class InvoiceData(BaseModel): amount: int; user_id: str
 
 @app.get("/")
-def read_root(): return {"status": "Focus Hatcher Backend v12 - Mega Radar!"}
+def read_root(): return {"status": "Focus Hatcher Backend v13 - Telegram Stars!"}
+
+# --- НОВЫЙ РОУТ ДЛЯ ГЕНЕРАЦИИ ЧЕКА НА ЗВЕЗДЫ ---
+@app.post("/api/payment/invoice")
+def create_invoice(data: InvoiceData):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/createInvoiceLink"
+    payload = {
+        "title": f"Покупка {data.amount} ⭐️",
+        "description": "Пополнение баланса Звезд в Focus Hatcher",
+        "payload": f"stars_{data.amount}_{data.user_id}_{int(time.time())}",
+        "provider_token": "", # Для Звезд токен провайдера должен быть пустым
+        "currency": "XTR", # Официальный код валюты Telegram Stars
+        "prices": [{"label": "Stars", "amount": data.amount}]
+    }
+    try:
+        res = requests.post(url, json=payload).json()
+        if res.get("ok"):
+            return {"status": "success", "invoice_link": res["result"]}
+        else:
+            return {"status": "error", "detail": res.get("description")}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 @app.post("/api/party/create")
 def create_party(data: PlayerData):

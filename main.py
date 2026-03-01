@@ -32,6 +32,7 @@ def init_db():
     conn = get_db()
     c = conn.cursor()
     
+    # Таблицы Пати
     c.execute('''CREATE TABLE IF NOT EXISTS parties (
                     code TEXT PRIMARY KEY, boss_hp INTEGER, boss_max_hp INTEGER
                  )''')
@@ -56,6 +57,7 @@ def init_db():
         try: c.execute(f"ALTER TABLE players ADD COLUMN {col} {col_type}")
         except sqlite3.OperationalError: pass
 
+    # Таблицы Профиля и Друзей
     c.execute('''CREATE TABLE IF NOT EXISTS global_users (
                     user_id TEXT PRIMARY KEY, name TEXT, avatar TEXT, 
                     level INTEGER, earned INTEGER, hatched INTEGER
@@ -67,6 +69,22 @@ def init_db():
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     sender_id TEXT, receiver_id TEXT, party_code TEXT, timestamp INTEGER
                  )''')
+
+    # === НОВЫЕ ТАБЛИЦЫ ДЛЯ ПРОМОКОДОВ ===
+    c.execute('''CREATE TABLE IF NOT EXISTS promo_codes (
+                    code TEXT PRIMARY KEY, type TEXT, val INTEGER, max_uses INTEGER, uses INTEGER DEFAULT 0
+                 )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS user_promos (
+                    user_id TEXT, code TEXT, UNIQUE(user_id, code)
+                 )''')
+                 
+    # Заполняем базовые промокоды, если таблица пустая
+    c.execute("SELECT COUNT(*) FROM promo_codes")
+    if c.fetchone()[0] == 0:
+        c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('START2026', 'money', 1000, 100000)")
+        c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('SPEED', 'speed', 5, 100000)")
+        c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('SECRET', 'stars', 10, 100)")
+        c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('JOKER', 'joker', 2, 50)")
 
     conn.commit()
     conn.close()
@@ -84,11 +102,12 @@ class FriendAction(BaseModel): user_id: str; friend_id: str
 class InviteData(BaseModel): sender_id: str; receiver_id: str; party_code: str
 class ExpeditionStartData(BaseModel): code: str; location: str
 class InvoiceData(BaseModel): amount: int; user_id: str
+class PromoRequest(BaseModel): user_id: str; code: str
 
 @app.get("/")
-def read_root(): return {"status": "Focus Hatcher Backend v14 - Secure Stars!"}
+def read_root(): return {"status": "Focus Hatcher Backend v15 - Secure Promos!"}
 
-# --- ГЕНЕРАЦИЯ ЧЕКА НА ЗВЕЗДЫ ---
+# --- ПОКУПКА ЗВЕЗД ---
 @app.post("/api/payment/invoice")
 def create_invoice(data: InvoiceData):
     if not BOT_TOKEN:
@@ -112,6 +131,40 @@ def create_invoice(data: InvoiceData):
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
+# --- АКТИВАЦИЯ ПРОМОКОДА ---
+@app.post("/api/promo/activate")
+def activate_promo(data: PromoRequest):
+    conn = get_db()
+    c = conn.cursor()
+    code_upper = data.code.upper()
+    
+    # 1. Проверяем, не вводил ли игрок этот код ранее
+    c.execute("SELECT * FROM user_promos WHERE user_id=? AND code=?", (data.user_id, code_upper))
+    if c.fetchone():
+        conn.close()
+        return {"status": "error", "detail": "Уже активирован!"}
+    
+    # 2. Ищем код в базе
+    c.execute("SELECT * FROM promo_codes WHERE code=?", (code_upper,))
+    promo = c.fetchone()
+    if not promo:
+        conn.close()
+        return {"status": "error", "detail": "Код не найден"}
+        
+    # 3. Проверяем лимит использований
+    if promo["max_uses"] > 0 and promo["uses"] >= promo["max_uses"]:
+        conn.close()
+        return {"status": "error", "detail": "Лимит активаций исчерпан!"}
+        
+    # 4. Начисляем: увеличиваем счетчик кода и записываем игрока
+    c.execute("UPDATE promo_codes SET uses = uses + 1 WHERE code=?", (code_upper,))
+    c.execute("INSERT INTO user_promos (user_id, code) VALUES (?, ?)", (data.user_id, code_upper))
+    conn.commit()
+    conn.close()
+    
+    return {"status": "success", "type": promo["type"], "val": promo["val"]}
+
+# --- ПАТИ ---
 @app.post("/api/party/create")
 def create_party(data: PlayerData):
     conn = get_db()

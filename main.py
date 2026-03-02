@@ -82,7 +82,7 @@ def init_db():
     # Заполняем базовые промокоды (один раз)
     c.execute("SELECT COUNT(*) FROM promo_codes")
     if c.fetchone()[0] == 0:
-        c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('START2026', 'money', 1000, 0)") # 0 = безлимит
+        c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('START2026', 'money', 1000, 0)")
         c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('SPEED', 'speed', 5, 0)")
         c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('SECRET', 'stars', 10, 100)")
         c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('JOKER', 'joker', 2, 50)")
@@ -114,7 +114,39 @@ class AdminPromoCreate(BaseModel):
     max_uses: int
 
 @app.get("/")
-def read_root(): return {"status": "Focus Hatcher Backend v16 - Secure Admin!"}
+def read_root(): return {"status": "Focus Hatcher Backend v17 - Forbes & Boxes!"}
+
+# --- НОВЫЙ РОУТ: FORBES (РЕЙТИНГ БОГАЧЕЙ) ---
+@app.get("/api/forbes/{user_id}")
+def get_forbes(user_id: str):
+    conn = get_db()
+    c = conn.cursor()
+    
+    # 1. Глобальный топ-50
+    c.execute('SELECT user_id, name, avatar, earned, level FROM global_users ORDER BY earned DESC LIMIT 50')
+    global_top = [dict(row) for row in c.fetchall()]
+    
+    # 2. Топ друзей
+    c.execute('''
+        SELECT g.user_id, g.name, g.avatar, g.earned, g.level 
+        FROM friends f 
+        JOIN global_users g ON f.friend_id = g.user_id 
+        WHERE f.user_id=?
+    ''', (user_id,))
+    friends_top = [dict(row) for row in c.fetchall()]
+    
+    # 3. Добавляем самого пользователя в топ друзей для сравнения
+    c.execute('SELECT user_id, name, avatar, earned, level FROM global_users WHERE user_id=?', (user_id,))
+    self_user = c.fetchone()
+    if self_user:
+        if not any(f['user_id'] == user_id for f in friends_top):
+            friends_top.append(dict(self_user))
+            
+    # Сортируем друзей по капиталу
+    friends_top.sort(key=lambda x: x['earned'], reverse=True)
+    
+    conn.close()
+    return {"global": global_top, "friends": friends_top}
 
 # --- АДМИН-ПАНЕЛЬ: СОЗДАНИЕ ПРОМОКОДА ---
 @app.post("/api/admin/promo/create")

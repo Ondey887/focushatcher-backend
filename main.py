@@ -53,7 +53,7 @@ def init_db():
         try: c.execute(f"ALTER TABLE parties ADD COLUMN {col} {col_type}")
         except sqlite3.OperationalError: pass
 
-    player_columns = [("boss_hp", "INTEGER DEFAULT 10000"), ("egg_skin", "TEXT DEFAULT 'default'")]
+    player_columns = [("boss_hp", "INTEGER DEFAULT 0"), ("egg_skin", "TEXT DEFAULT 'default'")]
     for col, col_type in player_columns:
         try: c.execute(f"ALTER TABLE players ADD COLUMN {col} {col_type}")
         except sqlite3.OperationalError: pass
@@ -79,7 +79,7 @@ def init_db():
                     user_id TEXT, code TEXT, UNIQUE(user_id, code)
                  )''')
                  
-    # Заполняем базовые промокоды (один раз)
+    # Заполняем базовые промокоды
     c.execute("SELECT COUNT(*) FROM promo_codes")
     if c.fetchone()[0] == 0:
         c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('START2026', 'money', 1000, 0)")
@@ -105,7 +105,6 @@ class ExpeditionStartData(BaseModel): code: str; location: str
 class InvoiceData(BaseModel): amount: int; user_id: str
 class PromoRequest(BaseModel): user_id: str; code: str
 
-# Модель для админки
 class AdminPromoCreate(BaseModel):
     password: str
     code: str
@@ -114,19 +113,14 @@ class AdminPromoCreate(BaseModel):
     max_uses: int
 
 @app.get("/")
-def read_root(): return {"status": "Focus Hatcher Backend v17 - Forbes & Boxes!"}
+def read_root(): return {"status": "Focus Hatcher Backend v18 - DNA & Raid!"}
 
-# --- НОВЫЙ РОУТ: FORBES (РЕЙТИНГ БОГАЧЕЙ) ---
 @app.get("/api/forbes/{user_id}")
 def get_forbes(user_id: str):
     conn = get_db()
     c = conn.cursor()
-    
-    # 1. Глобальный топ-50
     c.execute('SELECT user_id, name, avatar, earned, level FROM global_users ORDER BY earned DESC LIMIT 50')
     global_top = [dict(row) for row in c.fetchall()]
-    
-    # 2. Топ друзей
     c.execute('''
         SELECT g.user_id, g.name, g.avatar, g.earned, g.level 
         FROM friends f 
@@ -134,75 +128,59 @@ def get_forbes(user_id: str):
         WHERE f.user_id=?
     ''', (user_id,))
     friends_top = [dict(row) for row in c.fetchall()]
-    
-    # 3. Добавляем самого пользователя в топ друзей для сравнения
     c.execute('SELECT user_id, name, avatar, earned, level FROM global_users WHERE user_id=?', (user_id,))
     self_user = c.fetchone()
     if self_user:
         if not any(f['user_id'] == user_id for f in friends_top):
             friends_top.append(dict(self_user))
-            
-    # Сортируем друзей по капиталу
     friends_top.sort(key=lambda x: x['earned'], reverse=True)
-    
     conn.close()
     return {"global": global_top, "friends": friends_top}
 
-# --- АДМИН-ПАНЕЛЬ: СОЗДАНИЕ ПРОМОКОДА ---
 @app.post("/api/admin/promo/create")
 def admin_create_promo(data: AdminPromoCreate):
     if data.password != ADMIN_PASSWORD:
         return {"status": "error", "detail": "Неверный пароль!"}
-        
     conn = get_db()
     c = conn.cursor()
     code_upper = data.code.upper().strip()
-    
     c.execute("SELECT * FROM promo_codes WHERE code=?", (code_upper,))
     if c.fetchone():
         conn.close()
         return {"status": "error", "detail": "Код уже существует!"}
-        
     c.execute("INSERT INTO promo_codes (code, type, val, max_uses, uses) VALUES (?, ?, ?, ?, 0)",
               (code_upper, data.type, data.val, data.max_uses))
     conn.commit()
     conn.close()
     return {"status": "success"}
 
-# --- АКТИВАЦИЯ ПРОМОКОДА ---
 @app.post("/api/promo/activate")
 def activate_promo(data: PromoRequest):
     conn = get_db()
     c = conn.cursor()
     code_upper = data.code.upper()
-    
     c.execute("SELECT * FROM user_promos WHERE user_id=? AND code=?", (data.user_id, code_upper))
     if c.fetchone():
         conn.close()
         return {"status": "error", "detail": "Уже активирован!"}
-    
     c.execute("SELECT * FROM promo_codes WHERE code=?", (code_upper,))
     promo = c.fetchone()
     if not promo:
         conn.close()
         return {"status": "error", "detail": "Код не найден"}
-        
     if promo["max_uses"] > 0 and promo["uses"] >= promo["max_uses"]:
         conn.close()
         return {"status": "error", "detail": "Лимит активаций исчерпан!"}
-        
     c.execute("UPDATE promo_codes SET uses = uses + 1 WHERE code=?", (code_upper,))
     c.execute("INSERT INTO user_promos (user_id, code) VALUES (?, ?)", (data.user_id, code_upper))
     conn.commit()
     conn.close()
-    
     return {"status": "success", "type": promo["type"], "val": promo["val"]}
 
 @app.post("/api/payment/invoice")
 def create_invoice(data: InvoiceData):
     if not BOT_TOKEN:
         return {"status": "error", "detail": "Сервер не настроен (нет токена)"}
-        
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/createInvoiceLink"
     payload = {
         "title": f"Покупка {data.amount} ⭐️",
@@ -230,7 +208,7 @@ def create_party(data: PlayerData):
               (code, 10000, 10000, 0, 36000, 0, 0, data.user_id, 'none', 'forest', 0, 0, 0))
     c.execute("DELETE FROM players WHERE user_id=?", (data.user_id,))
     c.execute("INSERT INTO players (user_id, party_code, name, avatar, boss_hp, egg_skin) VALUES (?, ?, ?, ?, ?, ?)", 
-              (data.user_id, code, data.name, data.avatar, 10000, data.egg_skin))
+              (data.user_id, code, data.name, data.avatar, 0, data.egg_skin))
     conn.commit()
     conn.close()
     return {"status": "success", "partyCode": code}
@@ -245,7 +223,7 @@ def join_party(data: JoinData):
         raise HTTPException(status_code=404, detail="Пати не найдено")
     c.execute("DELETE FROM players WHERE user_id=?", (data.user_id,))
     c.execute("INSERT INTO players (user_id, party_code, name, avatar, boss_hp, egg_skin) VALUES (?, ?, ?, ?, ?, ?)", 
-              (data.user_id, data.code, data.name, data.avatar, 10000, data.egg_skin))
+              (data.user_id, data.code, data.name, data.avatar, 0, data.egg_skin))
     conn.commit()
     conn.close()
     return {"status": "success"}
@@ -290,9 +268,11 @@ def set_game(data: SetGameData):
         c.execute("UPDATE parties SET active_game=? WHERE code=?", (data.game_name, data.code))
         if data.game_name == 'none':
             c.execute("UPDATE parties SET expedition_end=0, expedition_score=0, wolf_hp=0, mega_radar=0 WHERE code=?", (data.code,))
-            c.execute("UPDATE players SET boss_hp=10000 WHERE party_code=?", (data.code,))
+            c.execute("UPDATE players SET boss_hp=0 WHERE party_code=?", (data.code,))
         elif data.game_name == 'tap_boss':
-            c.execute("UPDATE players SET boss_hp=10000 WHERE party_code=?", (data.code,))
+            # РЕВОРК: Устанавливаем общее ХП босса 10000, а игрокам 0 (это будет их нанесенный урон)
+            c.execute("UPDATE parties SET boss_hp=10000, boss_max_hp=10000 WHERE code=?", (data.code,))
+            c.execute("UPDATE players SET boss_hp=0 WHERE party_code=?", (data.code,))
         conn.commit()
     conn.close()
     return {"status": "success"}
@@ -310,16 +290,19 @@ def activate_radar(data: CodeOnly):
 def deal_damage(data: DamageData):
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT boss_hp FROM players WHERE user_id=? AND party_code=?", (data.user_id, data.code))
-    player = c.fetchone()
-    if not player:
+    # РЕВОРК: Бьем общее ХП пати, и прибавляем урон игроку
+    c.execute("SELECT boss_hp FROM parties WHERE code=?", (data.code,))
+    party = c.fetchone()
+    if not party or party["boss_hp"] <= 0:
         conn.close()
         return {"status": "error"}
-    new_hp = max(0, player["boss_hp"] - data.damage)
-    c.execute("UPDATE players SET boss_hp=? WHERE user_id=? AND party_code=?", (new_hp, data.user_id, data.code))
+        
+    new_boss_hp = max(0, party["boss_hp"] - data.damage)
+    c.execute("UPDATE parties SET boss_hp=? WHERE code=?", (new_boss_hp, data.code))
+    c.execute("UPDATE players SET boss_hp = boss_hp + ? WHERE user_id=? AND party_code=?", (data.damage, data.user_id, data.code))
     conn.commit()
     conn.close()
-    return {"status": "success", "new_hp": new_hp}
+    return {"status": "success"}
 
 @app.post("/api/party/expedition/wolf_damage")
 def wolf_damage(data: DamageData):
@@ -362,38 +345,24 @@ def start_expedition(data: ExpeditionStartData):
     c = conn.cursor()
     c.execute("SELECT avatar FROM players WHERE party_code=?", (data.code,))
     players = c.fetchall()
-    
-    score = 0
-    farm_count = 0
-    pred_count = 0
-    
+    score = 0; farm_count = 0; pred_count = 0
     for p in players:
         av = p["avatar"]
-        if av in ["unicorn", "dragon", "alien", "robot", "dino", "fireball", "god"]: 
-            score += 10
-        elif av in ["fox", "panda", "tiger", "lion", "cow", "pig", "monkey", "owl"]: 
-            score += 3
-        else: 
-            score += 1
-        
+        if av in ["unicorn", "dragon", "alien", "robot", "dino", "fireball", "god"]: score += 10
+        elif av in ["fox", "panda", "tiger", "lion", "cow", "pig", "monkey", "owl"]: score += 3
+        else: score += 1
         if av in ["cow", "pig", "duck"]: farm_count += 1
         if av in ["kitten", "tiger", "lion", "fox"]: pred_count += 1
 
-    if farm_count >= 3: 
-        score = int(score * 1.5)
-
+    if farm_count >= 3: score = int(score * 1.5)
     base_time = 5 * 60
     if data.location == 'mountains': base_time = 15 * 60
     elif data.location == 'space': base_time = 25 * 60
-
-    if pred_count >= 2: 
-        base_time = int(base_time * 0.85)
+    if pred_count >= 2: base_time = int(base_time * 0.85)
 
     end_time = int(time.time()) + base_time
-
     wolf_hp = 0
-    if random.random() < 0.15:
-        wolf_hp = len(players) * 20 
+    if random.random() < 0.15: wolf_hp = len(players) * 20 
     
     c.execute("UPDATE parties SET expedition_end=?, expedition_score=?, expedition_location=?, wolf_hp=?, wolf_max_hp=? WHERE code=?", 
               (end_time, score, data.location, wolf_hp, wolf_hp, data.code))

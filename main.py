@@ -460,6 +460,56 @@ def check_invites(user_id: str):
         return {"has_invite": True, "invite": dict(invite)}
     return {"has_invite": False}
 
+import uuid
+from pydantic import BaseModel
+from typing import List
+
+# Модели данных для Рынка
+class MarketLot(BaseModel):
+    lot_id: str = ""
+    seller_id: str
+    seller_name: str
+    pet_id: str
+    pet_stars: int
+    price: int
+    currency: str # 'coins' или 'stars'
+
+class BuyRequest(BaseModel):
+    lot_id: str
+    buyer_id: str
+
+# Временная база данных для рынка (список активных лотов)
+market_listings = []
+
+@app.post("/api/market/sell")
+async def sell_pet(lot: MarketLot):
+    lot.lot_id = str(uuid.uuid4())
+    market_listings.append(lot.dict())
+    return {"status": "success", "lot_id": lot.lot_id}
+
+@app.get("/api/market/list")
+async def get_market():
+    # Возвращаем все активные лоты (можно позже добавить сортировку/пагинацию)
+    return {"lots": list(reversed(market_listings))}
+
+@app.post("/api/market/buy")
+async def buy_pet(req: BuyRequest):
+    global market_listings
+    for lot in market_listings:
+        if lot["lot_id"] == req.lot_id:
+            if lot["seller_id"] == req.buyer_id:
+                return {"status": "error", "detail": "Ты не можешь купить своего же питомца!"}
+            
+            # Лот найден. Удаляем его с рынка
+            market_listings.remove(lot)
+            
+            # ВНИМАНИЕ: Здесь в идеале нужно добавить логику 
+            # зачисления денег на баланс продавца (lot["seller_id"]) 
+            # в твою глобальную базу данных пользователей.
+            
+            return {"status": "success", "lot": lot}
+            
+    return {"status": "error", "detail": "Лот уже кто-то купил или он не существует!"}
 @app.post("/api/invites/clear")
 def clear_invite(data: CodeOnly):
     conn = get_db()

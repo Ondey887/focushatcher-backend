@@ -80,10 +80,15 @@ def init_db():
                     user_id TEXT, code TEXT, UNIQUE(user_id, code)
                  )''')
                  
-    # === НОВАЯ ТАБЛИЦА РЫНКА ===
+    # === ТАБЛИЦЫ РЫНКА ===
     c.execute('''CREATE TABLE IF NOT EXISTS market_lots (
                     lot_id TEXT PRIMARY KEY, seller_id TEXT, seller_name TEXT, 
                     pet_id TEXT, pet_stars INTEGER, price INTEGER, currency TEXT
+                 )''')
+    # ПОЧТОВЫЙ ЯЩИК ДЛЯ ДЕНЕГ ЗА ПРОДАЖИ
+    c.execute('''CREATE TABLE IF NOT EXISTS market_rewards (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT, amount INTEGER, currency TEXT, pet_id TEXT
                  )''')
 
     # Заполняем базовые промокоды
@@ -114,18 +119,17 @@ class InvoiceData(BaseModel): amount: int; user_id: str
 class PromoRequest(BaseModel): user_id: str; code: str
 class AdminPromoCreate(BaseModel): password: str; code: str; type: str; val: int; max_uses: int
 
-# --- МОДЕЛИ РЫНКА ---
 class MarketLot(BaseModel): seller_id: str; seller_name: str; pet_id: str; pet_stars: int; price: int; currency: str
 class BuyRequest(BaseModel): lot_id: str; buyer_id: str
 
 @app.get("/")
-def read_root(): return {"status": "Focus Hatcher Backend - Restored & Market Added"}
+def read_root(): return {"status": "Focus Hatcher Backend - OK"}
 
 # ==========================================
-# РЫНОК (С ФИКСОМ ПУТЕЙ)
+# РЫНОК (С ВЫДАЧЕЙ НАГРАД)
 # ==========================================
 @app.post("/api/market/sell")
-@app.post("/api/api/market/sell") # Перехватываем двойной api из JS
+@app.post("/api/api/market/sell") 
 def sell_pet(lot: MarketLot):
     conn = get_db()
     c = conn.cursor()
@@ -141,7 +145,7 @@ def sell_pet(lot: MarketLot):
 def get_market():
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT * FROM market_lots ORDER BY rowid DESC") # Новые сверху
+    c.execute("SELECT * FROM market_lots ORDER BY rowid DESC") 
     lots = [dict(row) for row in c.fetchall()]
     conn.close()
     return {"lots": lots}
@@ -164,9 +168,31 @@ def buy_pet(req: BuyRequest):
         
     # Удаляем лот с рынка
     c.execute("DELETE FROM market_lots WHERE lot_id=?", (req.lot_id,))
+    
+    # КЛАДЕМ ДЕНЬГИ ПРОДАВЦУ В ПОЧТОВЫЙ ЯЩИК
+    c.execute("INSERT INTO market_rewards (user_id, amount, currency, pet_id) VALUES (?, ?, ?, ?)",
+              (lot["seller_id"], lot["price"], lot["currency"], lot["pet_id"]))
+              
     conn.commit()
     conn.close()
     return {"status": "success", "lot": dict(lot)}
+
+# Эндпоинт для проверки ящика с деньгами
+@app.get("/api/market/rewards/{user_id}")
+@app.get("/api/api/market/rewards/{user_id}")
+def check_market_rewards(user_id: str):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM market_rewards WHERE user_id=?", (user_id,))
+    rewards = [dict(row) for row in c.fetchall()]
+    
+    if rewards:
+        # Если забрали награды, удаляем их из ящика
+        c.execute("DELETE FROM market_rewards WHERE user_id=?", (user_id,))
+        conn.commit()
+        
+    conn.close()
+    return {"rewards": rewards}
 
 # ==========================================
 # ОСТАЛЬНЫЕ ФУНКЦИИ

@@ -8,7 +8,6 @@ import time
 import requests
 import uuid
 
-# БЕРЕМ ТОКЕН ИЗ СЕКРЕТОВ AMVERA (Переменных окружения)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "superadmin123")
 
@@ -59,7 +58,7 @@ def init_db():
         try: c.execute(f"ALTER TABLE players ADD COLUMN {col} {col_type}")
         except sqlite3.OperationalError: pass
 
-    # Таблицы Профиля и Друзей
+    # Таблицы Профиля
     c.execute('''CREATE TABLE IF NOT EXISTS global_users (
                     user_id TEXT PRIMARY KEY, name TEXT, avatar TEXT, 
                     level INTEGER, earned INTEGER, hatched INTEGER
@@ -72,7 +71,7 @@ def init_db():
                     sender_id TEXT, receiver_id TEXT, party_code TEXT, timestamp INTEGER
                  )''')
 
-    # Таблицы для Промокодов
+    # Промокоды
     c.execute('''CREATE TABLE IF NOT EXISTS promo_codes (
                     code TEXT PRIMARY KEY, type TEXT, val INTEGER, max_uses INTEGER, uses INTEGER DEFAULT 0
                  )''')
@@ -80,31 +79,27 @@ def init_db():
                     user_id TEXT, code TEXT, UNIQUE(user_id, code)
                  )''')
                  
-    # === ТАБЛИЦЫ РЫНКА ===
+    # === РЫНОК И ПОЧТОВЫЙ ЯЩИК ДЛЯ ДЕНЕГ ===
     c.execute('''CREATE TABLE IF NOT EXISTS market_lots (
                     lot_id TEXT PRIMARY KEY, seller_id TEXT, seller_name TEXT, 
                     pet_id TEXT, pet_stars INTEGER, price INTEGER, currency TEXT
                  )''')
-    # ПОЧТОВЫЙ ЯЩИК ДЛЯ ДЕНЕГ ЗА ПРОДАЖИ
+                 
     c.execute('''CREATE TABLE IF NOT EXISTS market_rewards (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id TEXT, amount INTEGER, currency TEXT, pet_id TEXT
                  )''')
 
-    # Заполняем базовые промокоды
     c.execute("SELECT COUNT(*) FROM promo_codes")
     if c.fetchone()[0] == 0:
         c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('START2026', 'money', 1000, 0)")
-        c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('SPEED', 'speed', 5, 0)")
-        c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('SECRET', 'stars', 10, 100)")
-        c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('JOKER', 'joker', 2, 50)")
 
     conn.commit()
     conn.close()
 
 init_db()
 
-# --- МОДЕЛИ ДАННЫХ ---
+# --- МОДЕЛИ ---
 class PlayerData(BaseModel): user_id: str; name: str; avatar: str; egg_skin: str
 class JoinData(PlayerData): code: str
 class DamageData(BaseModel): code: str; user_id: str; damage: int
@@ -121,9 +116,6 @@ class AdminPromoCreate(BaseModel): password: str; code: str; type: str; val: int
 
 class MarketLot(BaseModel): seller_id: str; seller_name: str; pet_id: str; pet_stars: int; price: int; currency: str
 class BuyRequest(BaseModel): lot_id: str; buyer_id: str
-
-@app.get("/")
-def read_root(): return {"status": "Focus Hatcher Backend - OK"}
 
 # ==========================================
 # РЫНОК (С ВЫДАЧЕЙ НАГРАД)
@@ -166,10 +158,10 @@ def buy_pet(req: BuyRequest):
         conn.close()
         return {"status": "error", "detail": "Нельзя купить своего пета"}
         
-    # Удаляем лот с рынка
+    # 1. Удаляем лот с витрины
     c.execute("DELETE FROM market_lots WHERE lot_id=?", (req.lot_id,))
     
-    # КЛАДЕМ ДЕНЬГИ ПРОДАВЦУ В ПОЧТОВЫЙ ЯЩИК
+    # 2. КЛАДЕМ ДЕНЬГИ ПРОДАВЦУ В ПОЧТОВЫЙ ЯЩИК
     c.execute("INSERT INTO market_rewards (user_id, amount, currency, pet_id) VALUES (?, ?, ?, ?)",
               (lot["seller_id"], lot["price"], lot["currency"], lot["pet_id"]))
               
@@ -177,7 +169,7 @@ def buy_pet(req: BuyRequest):
     conn.close()
     return {"status": "success", "lot": dict(lot)}
 
-# Эндпоинт для проверки ящика с деньгами
+# 3. ЭНДПОИНТ ДЛЯ ПРОВЕРКИ НАГРАД
 @app.get("/api/market/rewards/{user_id}")
 @app.get("/api/api/market/rewards/{user_id}")
 def check_market_rewards(user_id: str):
@@ -187,7 +179,7 @@ def check_market_rewards(user_id: str):
     rewards = [dict(row) for row in c.fetchall()]
     
     if rewards:
-        # Если забрали награды, удаляем их из ящика
+        # Если награды есть, отдаем их и удаляем из ящика
         c.execute("DELETE FROM market_rewards WHERE user_id=?", (user_id,))
         conn.commit()
         
@@ -198,6 +190,7 @@ def check_market_rewards(user_id: str):
 # ОСТАЛЬНЫЕ ФУНКЦИИ
 # ==========================================
 @app.get("/api/forbes/{user_id}")
+@app.get("/api/api/forbes/{user_id}")
 def get_forbes(user_id: str):
     conn = get_db()
     c = conn.cursor()
@@ -269,6 +262,7 @@ def create_invoice(data: InvoiceData):
         return {"status": "error", "detail": str(e)}
 
 @app.post("/api/party/create")
+@app.post("/api/api/party/create")
 def create_party(data: PlayerData):
     conn = get_db()
     c = conn.cursor()
@@ -283,6 +277,7 @@ def create_party(data: PlayerData):
     return {"status": "success", "partyCode": code}
 
 @app.post("/api/party/join")
+@app.post("/api/api/party/join")
 def join_party(data: JoinData):
     conn = get_db()
     c = conn.cursor()
@@ -298,6 +293,7 @@ def join_party(data: JoinData):
     return {"status": "success"}
 
 @app.get("/api/party/status/{code}")
+@app.get("/api/api/party/status/{code}")
 def get_party_status(code: str):
     conn = get_db()
     c = conn.cursor()
@@ -324,6 +320,7 @@ def get_party_status(code: str):
     }
 
 @app.post("/api/party/set_game")
+@app.post("/api/api/party/set_game")
 def set_game(data: SetGameData):
     conn = get_db()
     c = conn.cursor()
@@ -342,6 +339,7 @@ def set_game(data: SetGameData):
     return {"status": "success"}
 
 @app.post("/api/party/damage")
+@app.post("/api/api/party/damage")
 def deal_damage(data: DamageData):
     conn = get_db()
     c = conn.cursor()
@@ -358,6 +356,7 @@ def deal_damage(data: DamageData):
     return {"status": "success"}
 
 @app.post("/api/party/expedition/wolf_damage")
+@app.post("/api/api/party/expedition/wolf_damage")
 def wolf_damage(data: DamageData):
     conn = get_db()
     c = conn.cursor()
@@ -442,6 +441,7 @@ def claim_expedition(data: CodeOnly):
     return {"status": "success"}
 
 @app.post("/api/party/leave")
+@app.post("/api/api/party/leave")
 def leave_party(data: PlayerData):
     conn = get_db()
     c = conn.cursor()
@@ -458,6 +458,7 @@ def leave_party(data: PlayerData):
     return {"status": "success"}
 
 @app.post("/api/users/sync")
+@app.post("/api/api/users/sync")
 def sync_global_user(data: GlobalUserSync):
     conn = get_db()
     c = conn.cursor()
@@ -472,6 +473,7 @@ def sync_global_user(data: GlobalUserSync):
     return {"status": "success"}
 
 @app.post("/api/friends/add")
+@app.post("/api/api/friends/add")
 def add_friend(data: FriendAction):
     if data.user_id == data.friend_id: return {"status": "error", "detail": "Нельзя добавить себя"}
     conn = get_db()
@@ -489,6 +491,7 @@ def add_friend(data: FriendAction):
     return {"status": "success"}
 
 @app.get("/api/friends/list/{user_id}")
+@app.get("/api/api/friends/list/{user_id}")
 def get_friends_list(user_id: str):
     conn = get_db()
     c = conn.cursor()
@@ -498,6 +501,7 @@ def get_friends_list(user_id: str):
     return {"friends": friends}
 
 @app.post("/api/invites/send")
+@app.post("/api/api/invites/send")
 def send_invite(data: InviteData):
     conn = get_db()
     c = conn.cursor()
@@ -509,6 +513,7 @@ def send_invite(data: InviteData):
     return {"status": "success"}
 
 @app.get("/api/invites/check/{user_id}")
+@app.get("/api/api/invites/check/{user_id}")
 def check_invites(user_id: str):
     conn = get_db()
     c = conn.cursor()
@@ -521,6 +526,7 @@ def check_invites(user_id: str):
     return {"has_invite": False}
 
 @app.post("/api/invites/clear")
+@app.post("/api/api/invites/clear")
 def clear_invite(data: CodeOnly):
     conn = get_db()
     c = conn.cursor()

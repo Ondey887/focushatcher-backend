@@ -1,332 +1,505 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
-import uuid
-import time
+import sqlite3
 import random
-import string
+import os
+import time
+import requests
+import uuid
 
-app = FastAPI(title="Focus Hatcher API")
+# БЕРЕМ ТОКЕН ИЗ СЕКРЕТОВ AMVERA (Переменных окружения)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "superadmin123")
 
-# ==========================================
-# НАСТРОЙКА CORS (ОЧЕНЬ ВАЖНО ДЛЯ TELEGRAM WEB APP)
-# ==========================================
+app = FastAPI()
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Разрешаем запросы откуда угодно
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+DB_PATH = "/data/party.db"
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    conn = get_db()
+    c = conn.cursor()
+    
+    # Таблицы Пати
+    c.execute('''CREATE TABLE IF NOT EXISTS parties (
+                    code TEXT PRIMARY KEY, boss_hp INTEGER, boss_max_hp INTEGER
+                 )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS players (
+                    user_id TEXT PRIMARY KEY, party_code TEXT, name TEXT, avatar TEXT
+                 )''')
+    
+    party_columns = [
+        ("mega_progress", "INTEGER DEFAULT 0"), ("mega_target", "INTEGER DEFAULT 36000"),
+        ("expedition_end", "INTEGER DEFAULT 0"), ("expedition_score", "INTEGER DEFAULT 0"),
+        ("leader_id", "TEXT DEFAULT ''"), ("active_game", "TEXT DEFAULT 'none'"),
+        ("expedition_location", "TEXT DEFAULT 'forest'"),
+        ("wolf_hp", "INTEGER DEFAULT 0"), ("wolf_max_hp", "INTEGER DEFAULT 0"),
+        ("mega_radar", "INTEGER DEFAULT 0")
+    ]
+    for col, col_type in party_columns:
+        try: c.execute(f"ALTER TABLE parties ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError: pass
+
+    player_columns = [("boss_hp", "INTEGER DEFAULT 0"), ("egg_skin", "TEXT DEFAULT 'default'")]
+    for col, col_type in player_columns:
+        try: c.execute(f"ALTER TABLE players ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError: pass
+
+    # Таблицы Профиля и Друзей
+    c.execute('''CREATE TABLE IF NOT EXISTS global_users (
+                    user_id TEXT PRIMARY KEY, name TEXT, avatar TEXT, 
+                    level INTEGER, earned INTEGER, hatched INTEGER
+                 )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS friends (
+                    user_id TEXT, friend_id TEXT, UNIQUE(user_id, friend_id)
+                 )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS party_invites (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sender_id TEXT, receiver_id TEXT, party_code TEXT, timestamp INTEGER
+                 )''')
+
+    # Таблицы для Промокодов
+    c.execute('''CREATE TABLE IF NOT EXISTS promo_codes (
+                    code TEXT PRIMARY KEY, type TEXT, val INTEGER, max_uses INTEGER, uses INTEGER DEFAULT 0
+                 )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS user_promos (
+                    user_id TEXT, code TEXT, UNIQUE(user_id, code)
+                 )''')
+                 
+    # === НОВАЯ ТАБЛИЦА РЫНКА ===
+    c.execute('''CREATE TABLE IF NOT EXISTS market_lots (
+                    lot_id TEXT PRIMARY KEY, seller_id TEXT, seller_name TEXT, 
+                    pet_id TEXT, pet_stars INTEGER, price INTEGER, currency TEXT
+                 )''')
+
+    # Заполняем базовые промокоды
+    c.execute("SELECT COUNT(*) FROM promo_codes")
+    if c.fetchone()[0] == 0:
+        c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('START2026', 'money', 1000, 0)")
+        c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('SPEED', 'speed', 5, 0)")
+        c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('SECRET', 'stars', 10, 100)")
+        c.execute("INSERT INTO promo_codes (code, type, val, max_uses) VALUES ('JOKER', 'joker', 2, 50)")
+
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# --- МОДЕЛИ ДАННЫХ ---
+class PlayerData(BaseModel): user_id: str; name: str; avatar: str; egg_skin: str
+class JoinData(PlayerData): code: str
+class DamageData(BaseModel): code: str; user_id: str; damage: int
+class TimeData(BaseModel): code: str; seconds: int
+class CodeOnly(BaseModel): code: str
+class SetGameData(BaseModel): code: str; user_id: str; game_name: str
+class GlobalUserSync(BaseModel): user_id: str; name: str; avatar: str; level: int; earned: int; hatched: int
+class FriendAction(BaseModel): user_id: str; friend_id: str
+class InviteData(BaseModel): sender_id: str; receiver_id: str; party_code: str
+class ExpeditionStartData(BaseModel): code: str; location: str
+class InvoiceData(BaseModel): amount: int; user_id: str
+class PromoRequest(BaseModel): user_id: str; code: str
+class AdminPromoCreate(BaseModel): password: str; code: str; type: str; val: int; max_uses: int
+
+# --- МОДЕЛИ РЫНКА ---
+class MarketLot(BaseModel): seller_id: str; seller_name: str; pet_id: str; pet_stars: int; price: int; currency: str
+class BuyRequest(BaseModel): lot_id: str; buyer_id: str
+
+@app.get("/")
+def read_root(): return {"status": "Focus Hatcher Backend - Restored & Market Added"}
+
 # ==========================================
-# МОДЕЛИ ДАННЫХ (Pydantic)
-# ==========================================
-class MarketLot(BaseModel):
-    seller_id: str
-    seller_name: str
-    pet_id: str
-    pet_stars: int
-    price: int
-    currency: str
-
-class BuyRequest(BaseModel):
-    lot_id: str
-    buyer_id: str
-
-class UserSync(BaseModel):
-    user_id: str
-    name: str
-    avatar: str
-    level: int
-    earned: int
-    hatched: int
-
-class PartyCreate(BaseModel):
-    user_id: str
-    name: str
-    avatar: str
-    egg_skin: str
-
-class PartyJoin(BaseModel):
-    code: Optional[str] = ""
-    user_id: str
-    name: str
-    avatar: str
-    egg_skin: str
-
-class DamageReq(BaseModel):
-    code: str
-    user_id: str
-    damage: int
-
-class PromoCreate(BaseModel):
-    password: str
-    code: str
-    type: str
-    val: int
-    max_uses: int
-
-class PromoActivate(BaseModel):
-    user_id: str
-    code: str
-
-# ==========================================
-# БАЗЫ ДАННЫХ (В памяти для прототипа)
-# ==========================================
-market_listings = []
-users_db = {}
-parties = {}
-promocodes = {
-    "TEST": {"type": "money", "val": 5000, "uses": 100} # Базовый промокод для теста
-}
-friends_db = {} 
-invites_db = {} 
-
-# ==========================================
-# 1. РЫНОК (ГЛОБАЛЬНАЯ ТОРГОВЛЯ)
+# РЫНОК
 # ==========================================
 @app.post("/api/market/sell")
-async def sell_pet(lot: MarketLot):
-    lot_data = lot.dict()
-    lot_data["lot_id"] = str(uuid.uuid4())
-    market_listings.append(lot_data)
-    return {"status": "success", "lot_id": lot_data["lot_id"]}
+def sell_pet(lot: MarketLot):
+    conn = get_db()
+    c = conn.cursor()
+    lot_id = str(uuid.uuid4())
+    c.execute("INSERT INTO market_lots (lot_id, seller_id, seller_name, pet_id, pet_stars, price, currency) VALUES (?, ?, ?, ?, ?, ?, ?)",
+              (lot_id, lot.seller_id, lot.seller_name, lot.pet_id, lot.pet_stars, lot.price, lot.currency))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "lot_id": lot_id}
 
 @app.get("/api/market/list")
-async def get_market():
-    # Возвращаем список лотов, новые сверху
-    return {"lots": list(reversed(market_listings))}
+def get_market():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM market_lots ORDER BY rowid DESC") # Новые сверху
+    lots = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return {"lots": lots}
 
 @app.post("/api/market/buy")
-async def buy_pet(req: BuyRequest):
-    global market_listings
-    for lot in market_listings:
-        if lot["lot_id"] == req.lot_id:
-            if lot["seller_id"] == req.buyer_id:
-                return {"status": "error", "detail": "Нельзя купить своего пета!"}
-            
-            # Удаляем лот с рынка
-            market_listings.remove(lot)
-            
-            # В реальном проекте тут нужно начислить деньги продавцу (seller_id) в БД.
-            
-            return {"status": "success", "lot": lot}
-            
-    return {"status": "error", "detail": "Лот уже куплен или не существует!"}
+def buy_pet(req: BuyRequest):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM market_lots WHERE lot_id=?", (req.lot_id,))
+    lot = c.fetchone()
+    
+    if not lot:
+        conn.close()
+        return {"status": "error", "detail": "Лот не найден или уже куплен"}
+    
+    if lot["seller_id"] == req.buyer_id:
+        conn.close()
+        return {"status": "error", "detail": "Нельзя купить своего пета"}
+        
+    # Удаляем лот с рынка
+    c.execute("DELETE FROM market_lots WHERE lot_id=?", (req.lot_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "lot": dict(lot)}
 
 # ==========================================
-# 2. ПРОФИЛЬ И FORBES
+# ОСТАЛЬНЫЕ ФУНКЦИИ (ВОССТАНОВЛЕНЫ 1 В 1)
 # ==========================================
-@app.post("/users/sync")
-async def sync_user(user: UserSync):
-    users_db[user.user_id] = user.dict()
-    if user.user_id not in friends_db:
-        friends_db[user.user_id] = []
+@app.get("/api/forbes/{user_id}")
+def get_forbes(user_id: str):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('SELECT user_id, name, avatar, earned, level FROM global_users ORDER BY earned DESC LIMIT 50')
+    global_top = [dict(row) for row in c.fetchall()]
+    c.execute('''SELECT g.user_id, g.name, g.avatar, g.earned, g.level FROM friends f JOIN global_users g ON f.friend_id = g.user_id WHERE f.user_id=?''', (user_id,))
+    friends_top = [dict(row) for row in c.fetchall()]
+    c.execute('SELECT user_id, name, avatar, earned, level FROM global_users WHERE user_id=?', (user_id,))
+    self_user = c.fetchone()
+    if self_user:
+        if not any(f['user_id'] == user_id for f in friends_top):
+            friends_top.append(dict(self_user))
+    friends_top.sort(key=lambda x: x['earned'], reverse=True)
+    conn.close()
+    return {"global": global_top, "friends": friends_top}
+
+@app.post("/api/admin/promo/create")
+def admin_create_promo(data: AdminPromoCreate):
+    if data.password != ADMIN_PASSWORD: return {"status": "error", "detail": "Неверный пароль!"}
+    conn = get_db()
+    c = conn.cursor()
+    code_upper = data.code.upper().strip()
+    c.execute("SELECT * FROM promo_codes WHERE code=?", (code_upper,))
+    if c.fetchone():
+        conn.close()
+        return {"status": "error", "detail": "Код уже существует!"}
+    c.execute("INSERT INTO promo_codes (code, type, val, max_uses, uses) VALUES (?, ?, ?, ?, 0)", (code_upper, data.type, data.val, data.max_uses))
+    conn.commit()
+    conn.close()
     return {"status": "success"}
 
-@app.get("/forbes/{user_id}")
-async def get_forbes(user_id: str):
-    # Сортируем всех пользователей по заработанным монетам (earned)
-    sorted_users = sorted(users_db.values(), key=lambda x: x.get("earned", 0), reverse=True)
-    top_100 = sorted_users[:100]
-    return {"global": top_100}
+@app.post("/api/promo/activate")
+def activate_promo(data: PromoRequest):
+    conn = get_db()
+    c = conn.cursor()
+    code_upper = data.code.upper()
+    c.execute("SELECT * FROM user_promos WHERE user_id=? AND code=?", (data.user_id, code_upper))
+    if c.fetchone():
+        conn.close()
+        return {"status": "error", "detail": "Уже активирован!"}
+    c.execute("SELECT * FROM promo_codes WHERE code=?", (code_upper,))
+    promo = c.fetchone()
+    if not promo:
+        conn.close()
+        return {"status": "error", "detail": "Код не найден"}
+    if promo["max_uses"] > 0 and promo["uses"] >= promo["max_uses"]:
+        conn.close()
+        return {"status": "error", "detail": "Лимит активаций исчерпан!"}
+    c.execute("UPDATE promo_codes SET uses = uses + 1 WHERE code=?", (code_upper,))
+    c.execute("INSERT INTO user_promos (user_id, code) VALUES (?, ?)", (data.user_id, code_upper))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "type": promo["type"], "val": promo["val"]}
 
-# ==========================================
-# 3. МУЛЬТИПЛЕЕР (ПАТИ И БОССЫ)
-# ==========================================
-def generate_party_code():
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
-
-@app.post("/party/create")
-async def create_party(req: PartyCreate):
-    code = generate_party_code()
-    parties[code] = {
-        "leader_id": req.user_id,
-        "active_game": "none",
-        "boss_hp": 10000,
-        "boss_max_hp": 10000,
-        "mega_progress": 0,
-        "mega_target": 36000, 
-        "expedition_end": 0,
-        "expedition_score": 1,
-        "expedition_location": "forest",
-        "wolf_hp": 0,
-        "wolf_max_hp": 100,
-        "mega_radar": 0,
-        "players": [{
-            "user_id": req.user_id,
-            "name": req.name,
-            "avatar": req.avatar,
-            "egg_skin": req.egg_skin,
-            "boss_hp": 0
-        }]
+@app.post("/api/payment/invoice")
+def create_invoice(data: InvoiceData):
+    if not BOT_TOKEN: return {"status": "error", "detail": "Сервер не настроен (нет токена)"}
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/createInvoiceLink"
+    payload = {
+        "title": f"Покупка {data.amount} ⭐️", "description": "Пополнение баланса Звезд в Focus Hatcher",
+        "payload": f"stars_{data.amount}_{data.user_id}_{int(time.time())}",
+        "provider_token": "", "currency": "XTR", "prices": [{"label": "Stars", "amount": data.amount}]
     }
+    try:
+        res = requests.post(url, json=payload).json()
+        if res.get("ok"): return {"status": "success", "invoice_link": res["result"]}
+        else: return {"status": "error", "detail": res.get("description")}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+@app.post("/api/party/create")
+def create_party(data: PlayerData):
+    conn = get_db()
+    c = conn.cursor()
+    code = str(random.randint(1000, 9999))
+    c.execute("INSERT INTO parties (code, boss_hp, boss_max_hp, mega_progress, mega_target, expedition_end, expedition_score, leader_id, active_game, expedition_location, wolf_hp, wolf_max_hp, mega_radar) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 
+              (code, 10000, 10000, 0, 36000, 0, 0, data.user_id, 'none', 'forest', 0, 0, 0))
+    c.execute("DELETE FROM players WHERE user_id=?", (data.user_id,))
+    c.execute("INSERT INTO players (user_id, party_code, name, avatar, boss_hp, egg_skin) VALUES (?, ?, ?, ?, ?, ?)", 
+              (data.user_id, code, data.name, data.avatar, 0, data.egg_skin))
+    conn.commit()
+    conn.close()
     return {"status": "success", "partyCode": code}
 
-@app.post("/party/join")
-async def join_party(req: PartyJoin):
-    code = req.code.upper()
-    if code not in parties:
+@app.post("/api/party/join")
+def join_party(data: JoinData):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM parties WHERE code=?", (data.code,))
+    if not c.fetchone():
+        conn.close()
         raise HTTPException(status_code=404, detail="Пати не найдено")
-    
-    party = parties[code]
-    
-    # Проверяем, есть ли игрок уже в пати
-    player_exists = False
-    for p in party["players"]:
-        if p["user_id"] == req.user_id:
-            p["name"] = req.name
-            p["avatar"] = req.avatar
-            p["egg_skin"] = req.egg_skin
-            player_exists = True
-            break
-            
-    if not player_exists:
-        party["players"].append({
-            "user_id": req.user_id,
-            "name": req.name,
-            "avatar": req.avatar,
-            "egg_skin": req.egg_skin,
-            "boss_hp": 0
-        })
-        
+    c.execute("DELETE FROM players WHERE user_id=?", (data.user_id,))
+    c.execute("INSERT INTO players (user_id, party_code, name, avatar, boss_hp, egg_skin) VALUES (?, ?, ?, ?, ?, ?)", 
+              (data.user_id, data.code, data.name, data.avatar, 0, data.egg_skin))
+    conn.commit()
+    conn.close()
     return {"status": "success"}
 
-@app.get("/party/status/{code}")
-async def get_party_status(code: str):
-    code = code.upper()
-    if code not in parties:
+@app.get("/api/party/status/{code}")
+def get_party_status(code: str):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM parties WHERE code=?", (code,))
+    party = c.fetchone()
+    if not party:
+        conn.close()
         raise HTTPException(status_code=404, detail="Пати не найдено")
+    w_hp = party["wolf_hp"]
+    if party["expedition_end"] == 0 and w_hp > 0:
+        c.execute("UPDATE parties SET wolf_hp=0 WHERE code=?", (code,))
+        conn.commit()
+        w_hp = 0
+    c.execute("SELECT user_id, name, avatar, boss_hp, egg_skin FROM players WHERE party_code=?", (code,))
+    players = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return {
+        "boss_hp": party["boss_hp"], "boss_max_hp": party["boss_max_hp"],
+        "mega_progress": party["mega_progress"], "mega_target": party["mega_target"],
+        "expedition_end": party["expedition_end"], "expedition_score": party["expedition_score"],
+        "expedition_location": party["expedition_location"], "wolf_hp": w_hp, "wolf_max_hp": party["wolf_max_hp"],
+        "mega_radar": party["mega_radar"], "leader_id": party["leader_id"], "active_game": party["active_game"],
+        "players": players, "server_time": int(time.time())
+    }
+
+@app.post("/api/party/set_game")
+def set_game(data: SetGameData):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT leader_id FROM parties WHERE code=?", (data.code,))
+    party = c.fetchone()
+    if party and party["leader_id"] == data.user_id:
+        c.execute("UPDATE parties SET active_game=? WHERE code=?", (data.game_name, data.code))
+        if data.game_name == 'none':
+            c.execute("UPDATE parties SET expedition_end=0, expedition_score=0, wolf_hp=0, mega_radar=0 WHERE code=?", (data.code,))
+            c.execute("UPDATE players SET boss_hp=0 WHERE party_code=?", (data.code,))
+        elif data.game_name == 'tap_boss':
+            c.execute("UPDATE parties SET boss_hp=10000, boss_max_hp=10000 WHERE code=?", (data.code,))
+            c.execute("UPDATE players SET boss_hp=0 WHERE party_code=?", (data.code,))
+        conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.post("/api/party/damage")
+def deal_damage(data: DamageData):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT boss_hp FROM parties WHERE code=?", (data.code,))
+    party = c.fetchone()
+    if not party or party["boss_hp"] <= 0:
+        conn.close()
+        return {"status": "error"}
+    new_boss_hp = max(0, party["boss_hp"] - data.damage)
+    c.execute("UPDATE parties SET boss_hp=? WHERE code=?", (new_boss_hp, data.code))
+    c.execute("UPDATE players SET boss_hp = boss_hp + ? WHERE user_id=? AND party_code=?", (data.damage, data.user_id, data.code))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.post("/api/party/expedition/wolf_damage")
+def wolf_damage(data: DamageData):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT wolf_hp FROM parties WHERE code=?", (data.code,))
+    party = c.fetchone()
+    if party and party["wolf_hp"] > 0:
+        new_hp = max(0, party["wolf_hp"] - data.damage)
+        c.execute("UPDATE parties SET wolf_hp=? WHERE code=?", (new_hp, data.code))
+        conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.post("/api/party/mega_egg/add")
+def add_mega_egg_time(data: TimeData):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT mega_progress, mega_target FROM parties WHERE code=?", (data.code,))
+    party = c.fetchone()
+    if party:
+        new_progress = min(party["mega_target"], party["mega_progress"] + data.seconds)
+        c.execute("UPDATE parties SET mega_progress=? WHERE code=?", (new_progress, data.code))
+        conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.post("/api/party/mega_egg/claim")
+def claim_mega_egg(data: CodeOnly):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE parties SET mega_progress=0 WHERE code=?", (data.code,))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.post("/api/party/radar")
+def activate_radar(data: CodeOnly):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE parties SET mega_radar=1 WHERE code=?", (data.code,))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.post("/api/party/expedition/start")
+def start_expedition(data: ExpeditionStartData):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT avatar FROM players WHERE party_code=?", (data.code,))
+    players = c.fetchall()
+    score = 0; farm_count = 0; pred_count = 0
+    for p in players:
+        av = p["avatar"]
+        if av in ["unicorn", "dragon", "alien", "robot", "dino", "fireball", "god"]: score += 10
+        elif av in ["fox", "panda", "tiger", "lion", "cow", "pig", "monkey", "owl"]: score += 3
+        else: score += 1
+        if av in ["cow", "pig", "duck"]: farm_count += 1
+        if av in ["kitten", "tiger", "lion", "fox"]: pred_count += 1
+
+    if farm_count >= 3: score = int(score * 1.5)
+    base_time = 5 * 60
+    if data.location == 'mountains': base_time = 15 * 60
+    elif data.location == 'space': base_time = 25 * 60
+    if pred_count >= 2: base_time = int(base_time * 0.85)
+
+    end_time = int(time.time()) + base_time
+    wolf_hp = 0
+    if random.random() < 0.15: wolf_hp = len(players) * 20 
     
-    party = parties[code]
-    party["server_time"] = int(time.time())
-    return party
+    c.execute("UPDATE parties SET expedition_end=?, expedition_score=?, expedition_location=?, wolf_hp=?, wolf_max_hp=? WHERE code=?", 
+              (end_time, score, data.location, wolf_hp, wolf_hp, data.code))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "end_time": end_time}
 
-@app.post("/party/leave")
-async def leave_party(req: PartyJoin):
-    for code, party in list(parties.items()):
-        party["players"] = [p for p in party["players"] if p["user_id"] != req.user_id]
-        if not party["players"]:
-            del parties[code] # Удаляем пустое пати
+@app.post("/api/party/expedition/claim")
+def claim_expedition(data: CodeOnly):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE parties SET expedition_end=0, expedition_score=0, wolf_hp=0, mega_radar=0 WHERE code=?", (data.code,))
+    conn.commit()
+    conn.close()
     return {"status": "success"}
 
-@app.post("/party/set_game")
-async def set_game(req: dict):
-    code = req.get("code", "").upper()
-    if code in parties:
-        parties[code]["active_game"] = req.get("game_name", "none")
-        if req.get("game_name") == "tap_boss":
-            parties[code]["boss_hp"] = 10000 * len(parties[code]["players"])
-            parties[code]["boss_max_hp"] = parties[code]["boss_hp"]
-            for p in parties[code]["players"]:
-                p["boss_hp"] = 0
-        return {"status": "success"}
-    return {"status": "error"}
-
-@app.post("/party/damage")
-async def party_damage(req: DamageReq):
-    code = req.code.upper()
-    if code in parties:
-        parties[code]["boss_hp"] -= req.damage
-        for p in parties[code]["players"]:
-            if p["user_id"] == req.user_id:
-                p["boss_hp"] += req.damage
-        return {"status": "success"}
-    return {"status": "error"}
-
-# Заглушки для мини-игр
-@app.post("/party/mega_egg/add")
-async def mega_egg_add(req: dict): return {"status": "success"}
-@app.post("/party/mega_egg/claim")
-async def mega_egg_claim(req: dict): return {"status": "success"}
-@app.post("/party/radar")
-async def party_radar(req: dict): return {"status": "success"}
-@app.post("/party/expedition/start")
-async def exp_start(req: dict): return {"status": "success"}
-@app.post("/party/expedition/wolf_damage")
-async def exp_wolf(req: dict): return {"status": "success"}
-@app.post("/party/expedition/claim")
-async def exp_claim(req: dict): return {"status": "success"}
-
-# ==========================================
-# 4. ПРОМОКОДЫ И ОПЛАТА
-# ==========================================
-@app.post("/promo/activate")
-async def activate_promo(req: PromoActivate):
-    code = req.code.upper()
-    if code in promocodes and promocodes[code]["uses"] > 0:
-        promocodes[code]["uses"] -= 1
-        return {"status": "success", "type": promocodes[code]["type"], "val": promocodes[code]["val"]}
-    return {"status": "error", "detail": "Неверный или просроченный код!"}
-
-@app.post("/admin/promo/create")
-async def create_promo(req: PromoCreate):
-    if req.password != "1234": # СЕКРЕТНЫЙ ПАРОЛЬ АДМИНА
-        return {"status": "error", "detail": "Неверный пароль!"}
-    promocodes[req.code] = {"type": req.type, "val": req.val, "uses": req.max_uses}
+@app.post("/api/party/leave")
+def leave_party(data: PlayerData):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT code, leader_id FROM parties WHERE code=(SELECT party_code FROM players WHERE user_id=?)", (data.user_id,))
+    party = c.fetchone()
+    if party and party["leader_id"] == data.user_id:
+        party_code = party["code"]
+        c.execute("DELETE FROM players WHERE party_code=?", (party_code,))
+        c.execute("DELETE FROM parties WHERE code=?", (party_code,))
+    else:
+        c.execute("DELETE FROM players WHERE user_id=?", (data.user_id,))
+    conn.commit()
+    conn.close()
     return {"status": "success"}
 
-@app.post("/payment/invoice")
-async def create_invoice(req: dict):
-    return {"status": "success", "invoice_link": "https://t.me/"}
-
-# ==========================================
-# 5. ДРУЗЬЯ И ПРИГЛАШЕНИЯ
-# ==========================================
-@app.post("/friends/add")
-async def add_friend(req: dict):
-    uid = req.get("user_id")
-    fid = req.get("friend_id")
-    if fid not in users_db:
-        return {"status": "error", "detail": "Игрок не найден в базе!"}
-    
-    if uid not in friends_db:
-        friends_db[uid] = []
-    if fid not in friends_db[uid]:
-        friends_db[uid].append(fid)
+@app.post("/api/users/sync")
+def sync_global_user(data: GlobalUserSync):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('''INSERT INTO global_users (user_id, name, avatar, level, earned, hatched) 
+                 VALUES (?, ?, ?, ?, ?, ?) 
+                 ON CONFLICT(user_id) DO UPDATE SET 
+                 name=excluded.name, avatar=excluded.avatar, level=excluded.level, 
+                 earned=excluded.earned, hatched=excluded.hatched''', 
+              (data.user_id, data.name, data.avatar, data.level, data.earned, data.hatched))
+    conn.commit()
+    conn.close()
     return {"status": "success"}
 
-@app.get("/friends/list/{user_id}")
-async def get_friends(user_id: str):
-    flist = friends_db.get(user_id, [])
-    result = []
-    for fid in flist:
-        if fid in users_db:
-            result.append(users_db[fid])
-    return {"friends": result}
-
-@app.post("/invites/send")
-async def send_invite(req: dict):
-    receiver = req.get("receiver_id")
-    sender = req.get("sender_id")
-    code = req.get("party_code")
-    
-    if receiver in users_db and sender in users_db:
-        invites_db[receiver] = {
-            "id": str(uuid.uuid4()),
-            "sender_id": sender,
-            "sender_name": users_db[sender].get("name", "Игрок"),
-            "sender_avatar": users_db[sender].get("avatar", "default"),
-            "party_code": code
-        }
+@app.post("/api/friends/add")
+def add_friend(data: FriendAction):
+    if data.user_id == data.friend_id: return {"status": "error", "detail": "Нельзя добавить себя"}
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM global_users WHERE user_id=?", (data.friend_id,))
+    if not c.fetchone(): 
+        conn.close()
+        return {"status": "error", "detail": "Игрок не найден"}
+    try:
+        c.execute("INSERT INTO friends (user_id, friend_id) VALUES (?, ?)", (data.user_id, data.friend_id))
+        c.execute("INSERT INTO friends (user_id, friend_id) VALUES (?, ?)", (data.friend_id, data.user_id))
+        conn.commit()
+    except sqlite3.IntegrityError: pass 
+    conn.close()
     return {"status": "success"}
 
-@app.get("/invites/check/{user_id}")
-async def check_invites(user_id: str):
-    if user_id in invites_db:
-        return {"has_invite": True, "invite": invites_db[user_id]}
+@app.get("/api/friends/list/{user_id}")
+def get_friends_list(user_id: str):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('''SELECT g.* FROM friends f JOIN global_users g ON f.friend_id = g.user_id WHERE f.user_id=?''', (user_id,))
+    friends = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return {"friends": friends}
+
+@app.post("/api/invites/send")
+def send_invite(data: InviteData):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM party_invites WHERE sender_id=? AND receiver_id=?", (data.sender_id, data.receiver_id))
+    c.execute("INSERT INTO party_invites (sender_id, receiver_id, party_code, timestamp) VALUES (?, ?, ?, ?)", 
+              (data.sender_id, data.receiver_id, data.party_code, int(time.time())))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.get("/api/invites/check/{user_id}")
+def check_invites(user_id: str):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute('''SELECT i.id, i.party_code, g.name as sender_name, g.avatar as sender_avatar 
+                 FROM party_invites i JOIN global_users g ON i.sender_id = g.user_id
+                 WHERE i.receiver_id=? AND (? - i.timestamp) < 300 LIMIT 1''', (user_id, int(time.time())))
+    invite = c.fetchone()
+    conn.close()
+    if invite: return {"has_invite": True, "invite": dict(invite)}
     return {"has_invite": False}
 
-@app.post("/invites/clear")
-async def clear_invites(req: dict):
-    for uid, inv in list(invites_db.items()):
-        if inv["id"] == req.get("code"):
-            del invites_db[uid]
+@app.post("/api/invites/clear")
+def clear_invite(data: CodeOnly):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("DELETE FROM party_invites WHERE id=?", (data.code,)) 
+    conn.commit()
+    conn.close()
     return {"status": "success"}
 
 if __name__ == "__main__":
     import uvicorn
-    # Запуск сервера
     uvicorn.run(app, host="0.0.0.0", port=8000)

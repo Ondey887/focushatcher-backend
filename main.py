@@ -122,9 +122,10 @@ class BuyRequest(BaseModel): lot_id: str; buyer_id: str
 def read_root(): return {"status": "Focus Hatcher Backend - Restored & Market Added"}
 
 # ==========================================
-# РЫНОК
+# РЫНОК (С ФИКСОМ ПУТЕЙ)
 # ==========================================
 @app.post("/api/market/sell")
+@app.post("/api/api/market/sell") # Перехватываем двойной api из JS
 def sell_pet(lot: MarketLot):
     conn = get_db()
     c = conn.cursor()
@@ -136,6 +137,7 @@ def sell_pet(lot: MarketLot):
     return {"status": "success", "lot_id": lot_id}
 
 @app.get("/api/market/list")
+@app.get("/api/api/market/list")
 def get_market():
     conn = get_db()
     c = conn.cursor()
@@ -145,6 +147,7 @@ def get_market():
     return {"lots": lots}
 
 @app.post("/api/market/buy")
+@app.post("/api/api/market/buy")
 def buy_pet(req: BuyRequest):
     conn = get_db()
     c = conn.cursor()
@@ -166,7 +169,7 @@ def buy_pet(req: BuyRequest):
     return {"status": "success", "lot": dict(lot)}
 
 # ==========================================
-# ОСТАЛЬНЫЕ ФУНКЦИИ (ВОССТАНОВЛЕНЫ 1 В 1)
+# ОСТАЛЬНЫЕ ФУНКЦИИ
 # ==========================================
 @app.get("/api/forbes/{user_id}")
 def get_forbes(user_id: str):

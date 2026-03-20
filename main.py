@@ -63,6 +63,11 @@ def init_db():
                     user_id TEXT PRIMARY KEY, name TEXT, avatar TEXT, 
                     level INTEGER, earned INTEGER, hatched INTEGER
                  )''')
+                 
+    # БЕЗОПАСНОЕ ДОБАВЛЕНИЕ НОВОЙ ВАЛЮТЫ (ПЫЛЬ)
+    try: c.execute("ALTER TABLE global_users ADD COLUMN dust INTEGER DEFAULT 0")
+    except sqlite3.OperationalError: pass
+
     c.execute('''CREATE TABLE IF NOT EXISTS friends (
                     user_id TEXT, friend_id TEXT, UNIQUE(user_id, friend_id)
                  )''')
@@ -79,7 +84,7 @@ def init_db():
                     user_id TEXT, code TEXT, UNIQUE(user_id, code)
                  )''')
                  
-    # === РЫНОК И ПОЧТОВЫЙ ЯЩИК ДЛЯ ДЕНЕГ ===
+    # Рынок
     c.execute('''CREATE TABLE IF NOT EXISTS market_lots (
                     lot_id TEXT PRIMARY KEY, seller_id TEXT, seller_name TEXT, 
                     pet_id TEXT, pet_stars INTEGER, price INTEGER, currency TEXT
@@ -106,7 +111,7 @@ class DamageData(BaseModel): code: str; user_id: str; damage: int
 class TimeData(BaseModel): code: str; seconds: int
 class CodeOnly(BaseModel): code: str
 class SetGameData(BaseModel): code: str; user_id: str; game_name: str
-class GlobalUserSync(BaseModel): user_id: str; name: str; avatar: str; level: int; earned: int; hatched: int
+class GlobalUserSync(BaseModel): user_id: str; name: str; avatar: str; level: int; earned: int; hatched: int; dust: int = 0
 class FriendAction(BaseModel): user_id: str; friend_id: str
 class InviteData(BaseModel): sender_id: str; receiver_id: str; party_code: str
 class ExpeditionStartData(BaseModel): code: str; location: str
@@ -118,7 +123,7 @@ class MarketLot(BaseModel): seller_id: str; seller_name: str; pet_id: str; pet_s
 class BuyRequest(BaseModel): lot_id: str; buyer_id: str
 
 # ==========================================
-# РЫНОК (С ВЫДАЧЕЙ НАГРАД)
+# РЫНОК
 # ==========================================
 @app.post("/api/market/sell")
 @app.post("/api/api/market/sell") 
@@ -158,10 +163,8 @@ def buy_pet(req: BuyRequest):
         conn.close()
         return {"status": "error", "detail": "Нельзя купить своего пета"}
         
-    # 1. Удаляем лот с витрины
     c.execute("DELETE FROM market_lots WHERE lot_id=?", (req.lot_id,))
     
-    # 2. КЛАДЕМ ДЕНЬГИ ПРОДАВЦУ В ПОЧТОВЫЙ ЯЩИК
     c.execute("INSERT INTO market_rewards (user_id, amount, currency, pet_id) VALUES (?, ?, ?, ?)",
               (lot["seller_id"], lot["price"], lot["currency"], lot["pet_id"]))
               
@@ -169,7 +172,6 @@ def buy_pet(req: BuyRequest):
     conn.close()
     return {"status": "success", "lot": dict(lot)}
 
-# 3. ЭНДПОИНТ ДЛЯ ПРОВЕРКИ НАГРАД
 @app.get("/api/market/rewards/{user_id}")
 @app.get("/api/api/market/rewards/{user_id}")
 def check_market_rewards(user_id: str):
@@ -179,7 +181,6 @@ def check_market_rewards(user_id: str):
     rewards = [dict(row) for row in c.fetchall()]
     
     if rewards:
-        # Если награды есть, отдаем их и удаляем из ящика
         c.execute("DELETE FROM market_rewards WHERE user_id=?", (user_id,))
         conn.commit()
         
@@ -462,12 +463,12 @@ def leave_party(data: PlayerData):
 def sync_global_user(data: GlobalUserSync):
     conn = get_db()
     c = conn.cursor()
-    c.execute('''INSERT INTO global_users (user_id, name, avatar, level, earned, hatched) 
-                 VALUES (?, ?, ?, ?, ?, ?) 
+    c.execute('''INSERT INTO global_users (user_id, name, avatar, level, earned, hatched, dust) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?) 
                  ON CONFLICT(user_id) DO UPDATE SET 
                  name=excluded.name, avatar=excluded.avatar, level=excluded.level, 
-                 earned=excluded.earned, hatched=excluded.hatched''', 
-              (data.user_id, data.name, data.avatar, data.level, data.earned, data.hatched))
+                 earned=excluded.earned, hatched=excluded.hatched, dust=excluded.dust''', 
+              (data.user_id, data.name, data.avatar, data.level, data.earned, data.hatched, data.dust))
     conn.commit()
     conn.close()
     return {"status": "success"}

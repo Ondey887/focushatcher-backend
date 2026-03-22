@@ -2,4 +2,4 @@ fastapi
 uvicorn
 pydantic
 requests
-python-socketio[asyncio]
+python-socketio

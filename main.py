@@ -10,7 +10,6 @@ import uuid
 import asyncio
 
 # === ЖЕЛЕЗОБЕТОННАЯ ЗАЩИТА ОТ КРАША СЕРВЕРА ===
-# Если библиотека не установлена, сервер всё равно запустится и Пати будет работать!
 try:
     import socketio
     HAS_SOCKETIO = True
@@ -29,6 +28,34 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Глобальные переменные Реактора
+active_reactors = {}
+GENES = ['🔴', '🔵', '🟢', '🟡', '🟣']
+
+if HAS_SOCKETIO:
+    sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
+
+    async def reactor_timer_task(room_id):
+        """Фоновый цикл таймера Реактора"""
+        while room_id in active_reactors:
+            await asyncio.sleep(1)
+            reactor = active_reactors.get(room_id)
+            if not reactor:
+                break
+            
+            reactor['timeLeft'] -= 1
+            await sio.emit('timerUpdate', reactor['timeLeft'], room=room_id)
+            
+            if reactor['timeLeft'] <= 0:
+                await sio.emit('gameOver', {'result': 'lose'}, room=room_id)
+                if room_id in active_reactors:
+                    del active_reactors[room_id]
+                break
+else:
+    async def reactor_timer_task(room_id):
+        pass
+
 
 # ==========================================
 # БАЗА ДАННЫХ И ИНИЦИАЛИЗАЦИЯ
@@ -133,10 +160,6 @@ class AdminPromoCreate(BaseModel): password: str; code: str; type: str; val: int
 class MarketLot(BaseModel): seller_id: str; seller_name: str; pet_id: str; pet_stars: int; price: int; currency: str
 class BuyRequest(BaseModel): lot_id: str; buyer_id: str
 
-# Глобальные переменные Реактора
-active_reactors = {}
-GENES = ['🔴', '🔵', '🟢', '🟡', '🟣']
-
 # ==========================================
 # РЫНОК
 # ==========================================
@@ -203,7 +226,7 @@ def check_market_rewards(user_id: str):
     return {"rewards": rewards}
 
 # ==========================================
-# ПАТИ И МИНИ-ИГРЫ
+# ОСТАЛЬНЫЕ ФУНКЦИИ
 # ==========================================
 @app.get("/api/forbes/{user_id}")
 @app.get("/api/api/forbes/{user_id}")
@@ -335,9 +358,10 @@ def get_party_status(code: str):
         "players": players, "server_time": int(time.time())
     }
 
+# === ИСПРАВЛЕНИЕ: СДЕЛАЛИ ФУНКЦИЮ АСИНХРОННОЙ (async def) ===
 @app.post("/api/party/set_game")
 @app.post("/api/api/party/set_game")
-def set_game(data: SetGameData):
+async def set_game(data: SetGameData):
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT leader_id FROM parties WHERE code=?", (data.code,))
@@ -362,7 +386,8 @@ def set_game(data: SetGameData):
                     'progress': 0,
                     'secretCode': random.choices(GENES, k=4)
                 }
-                sio.start_background_task(reactor_timer_task, data.code)
+                # Запуск таймера через asyncio
+                asyncio.create_task(reactor_timer_task(data.code))
             
         conn.commit()
     conn.close()
@@ -565,28 +590,11 @@ def clear_invite(data: CodeOnly):
     conn.close()
     return {"status": "success"}
 
+
 # ==========================================
 # ИНТЕГРАЦИЯ WEBSOCKETS И FASTAPI
 # ==========================================
 if HAS_SOCKETIO:
-    sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
-
-    async def reactor_timer_task(room_id):
-        while room_id in active_reactors:
-            await asyncio.sleep(1)
-            reactor = active_reactors.get(room_id)
-            if not reactor:
-                break
-            
-            reactor['timeLeft'] -= 1
-            await sio.emit('timerUpdate', reactor['timeLeft'], room=room_id)
-            
-            if reactor['timeLeft'] <= 0:
-                await sio.emit('gameOver', {'result': 'lose'}, room=room_id)
-                if room_id in active_reactors:
-                    del active_reactors[room_id]
-                break
-
     @sio.on('joinRoom')
     async def join_room(sid, data):
         room_id = data.get('roomId')
@@ -617,5 +625,5 @@ if HAS_SOCKETIO:
             reactor['timeLeft'] -= 5
             await sio.emit('wrongCode', {'newTimeLeft': reactor['timeLeft']}, room=room_id)
 
-    # Оборачиваем FastAPI без конфликта с POST-маршрутами
+    # Оборачиваем FastAPI
     app = socketio.ASGIApp(sio, other_asgi_app=app)

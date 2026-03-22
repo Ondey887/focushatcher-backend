@@ -7,6 +7,8 @@ import os
 import time
 import requests
 import uuid
+import socketio
+import asyncio
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "superadmin123")
@@ -21,6 +23,72 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ==========================================
+# WEBSOCKETS (SOCKET.IO) ДЛЯ РЕАКТОРА
+# ==========================================
+sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
+socket_app = socketio.ASGIApp(sio, app)
+
+active_reactors = {}
+GENES = ['🔴', '🔵', '🟢', '🟡', '🟣']
+
+async def reactor_timer_task(room_id):
+    """Фоновый цикл сервера: тикает каждую секунду и рассылает время в комнату"""
+    while room_id in active_reactors:
+        await asyncio.sleep(1)
+        reactor = active_reactors.get(room_id)
+        if not reactor:
+            break
+        
+        reactor['timeLeft'] -= 1
+        await sio.emit('timerUpdate', reactor['timeLeft'], room=room_id)
+        
+        if reactor['timeLeft'] <= 0:
+            await sio.emit('gameOver', {'result': 'lose'}, room=room_id)
+            if room_id in active_reactors:
+                del active_reactors[room_id]
+            break
+
+@sio.on('joinRoom')
+async def join_room(sid, data):
+    """Клиенты должны вызывать это при входе в Пати, чтобы получать события Реактора"""
+    room_id = data.get('roomId')
+    if room_id:
+        sio.enter_room(sid, room_id)
+
+@sio.on('submitCode')
+async def handle_submit_code(sid, data):
+    """Обработка введенного кода от Инженера"""
+    room_id = data.get('roomId')
+    code = data.get('code')
+    reactor = active_reactors.get(room_id)
+    
+    if not reactor: return
+    
+    if code == reactor['secretCode']:
+        reactor['progress'] += 1
+        
+        if reactor['progress'] >= 3:
+            # 3 успешных ввода - победа
+            await sio.emit('gameWon', {'result': 'win'}, room=room_id)
+            if room_id in active_reactors:
+                del active_reactors[room_id]
+        else:
+            # Выдаем новый код
+            reactor['secretCode'] = random.choices(GENES, k=4)
+            await sio.emit('correctCode', {
+                'newCode': reactor['secretCode'], 
+                'progress': reactor['progress']
+            }, room=room_id)
+    else:
+        # Ошибка - штраф по времени
+        reactor['timeLeft'] -= 5
+        await sio.emit('wrongCode', {'newTimeLeft': reactor['timeLeft']}, room=room_id)
+
+
+# ==========================================
+# БАЗА ДАННЫХ И ИНИЦИАЛИЗАЦИЯ
+# ==========================================
 DB_PATH = "/data/party.db"
 
 def get_db():
@@ -64,7 +132,6 @@ def init_db():
                     level INTEGER, earned INTEGER, hatched INTEGER
                  )''')
                  
-    # БЕЗОПАСНОЕ ДОБАВЛЕНИЕ НОВОЙ ВАЛЮТЫ (ПЫЛЬ)
     try: c.execute("ALTER TABLE global_users ADD COLUMN dust INTEGER DEFAULT 0")
     except sqlite3.OperationalError: pass
 
@@ -329,12 +396,28 @@ def set_game(data: SetGameData):
     party = c.fetchone()
     if party and party["leader_id"] == data.user_id:
         c.execute("UPDATE parties SET active_game=? WHERE code=?", (data.game_name, data.code))
+        
         if data.game_name == 'none':
             c.execute("UPDATE parties SET expedition_end=0, expedition_score=0, wolf_hp=0, mega_radar=0 WHERE code=?", (data.code,))
             c.execute("UPDATE players SET boss_hp=0 WHERE party_code=?", (data.code,))
+            # Остановка реактора
+            if data.code in active_reactors:
+                del active_reactors[data.code]
+                
         elif data.game_name == 'tap_boss':
             c.execute("UPDATE parties SET boss_hp=10000, boss_max_hp=10000 WHERE code=?", (data.code,))
             c.execute("UPDATE players SET boss_hp=0 WHERE party_code=?", (data.code,))
+            
+        elif data.game_name == 'quantum_reactor':
+            # Инициализация Реактора
+            active_reactors[data.code] = {
+                'timeLeft': 60,
+                'progress': 0,
+                'secretCode': random.choices(GENES, k=4)
+            }
+            # Запускаем фоновый цикл для таймера
+            sio.start_background_task(reactor_timer_task, data.code)
+            
         conn.commit()
     conn.close()
     return {"status": "success"}
@@ -538,4 +621,5 @@ def clear_invite(data: CodeOnly):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # ЗАМЕНА: Запускаем обертку socket_app вместо обычного app
+    uvicorn.run(socket_app, host="0.0.0.0", port=8000)

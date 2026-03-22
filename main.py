@@ -56,7 +56,6 @@ else:
     async def reactor_timer_task(room_id):
         pass
 
-
 # ==========================================
 # БАЗА ДАННЫХ И ИНИЦИАЛИЗАЦИЯ
 # ==========================================
@@ -103,7 +102,14 @@ def init_db():
                     level INTEGER, earned INTEGER, hatched INTEGER
                  )''')
                  
+    # Новые поля для обновления (Пыль, Батл Пасс, Тикеты)
     try: c.execute("ALTER TABLE global_users ADD COLUMN dust INTEGER DEFAULT 0")
+    except sqlite3.OperationalError: pass
+    
+    try: c.execute("ALTER TABLE global_users ADD COLUMN claimed_rewards TEXT DEFAULT '[]'")
+    except sqlite3.OperationalError: pass
+    
+    try: c.execute("ALTER TABLE global_users ADD COLUMN mythic_tickets INTEGER DEFAULT 0")
     except sqlite3.OperationalError: pass
 
     c.execute('''CREATE TABLE IF NOT EXISTS friends (
@@ -149,16 +155,26 @@ class DamageData(BaseModel): code: str; user_id: str; damage: int
 class TimeData(BaseModel): code: str; seconds: int
 class CodeOnly(BaseModel): code: str
 class SetGameData(BaseModel): code: str; user_id: str; game_name: str
-class GlobalUserSync(BaseModel): user_id: str; name: str; avatar: str; level: int; earned: int; hatched: int; dust: int = 0
 class FriendAction(BaseModel): user_id: str; friend_id: str
 class InviteData(BaseModel): sender_id: str; receiver_id: str; party_code: str
 class ExpeditionStartData(BaseModel): code: str; location: str
 class InvoiceData(BaseModel): amount: int; user_id: str
 class PromoRequest(BaseModel): user_id: str; code: str
 class AdminPromoCreate(BaseModel): password: str; code: str; type: str; val: int; max_uses: int
-
 class MarketLot(BaseModel): seller_id: str; seller_name: str; pet_id: str; pet_stars: int; price: int; currency: str
 class BuyRequest(BaseModel): lot_id: str; buyer_id: str
+
+# Обновленная модель для синхронизации с Батл Пассом
+class GlobalUserSync(BaseModel): 
+    user_id: str
+    name: str
+    avatar: str
+    level: int
+    earned: int
+    hatched: int
+    dust: int = 0
+    claimed_rewards: str = "[]"
+    mythic_tickets: int = 0
 
 # ==========================================
 # РЫНОК
@@ -358,7 +374,6 @@ def get_party_status(code: str):
         "players": players, "server_time": int(time.time())
     }
 
-# === ИСПРАВЛЕНИЕ: СДЕЛАЛИ ФУНКЦИЮ АСИНХРОННОЙ (async def) ===
 @app.post("/api/party/set_game")
 @app.post("/api/api/party/set_game")
 async def set_game(data: SetGameData):
@@ -386,7 +401,6 @@ async def set_game(data: SetGameData):
                     'progress': 0,
                     'secretCode': random.choices(GENES, k=4)
                 }
-                # Запуск таймера через asyncio
                 asyncio.create_task(reactor_timer_task(data.code))
             
         conn.commit()
@@ -517,12 +531,14 @@ def leave_party(data: PlayerData):
 def sync_global_user(data: GlobalUserSync):
     conn = get_db()
     c = conn.cursor()
-    c.execute('''INSERT INTO global_users (user_id, name, avatar, level, earned, hatched, dust) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?) 
+    # Обновленный запрос: сохраняем claimed_rewards и mythic_tickets
+    c.execute('''INSERT INTO global_users (user_id, name, avatar, level, earned, hatched, dust, claimed_rewards, mythic_tickets) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) 
                  ON CONFLICT(user_id) DO UPDATE SET 
                  name=excluded.name, avatar=excluded.avatar, level=excluded.level, 
-                 earned=excluded.earned, hatched=excluded.hatched, dust=excluded.dust''', 
-              (data.user_id, data.name, data.avatar, data.level, data.earned, data.hatched, data.dust))
+                 earned=excluded.earned, hatched=excluded.hatched, dust=excluded.dust,
+                 claimed_rewards=excluded.claimed_rewards, mythic_tickets=excluded.mythic_tickets''', 
+              (data.user_id, data.name, data.avatar, data.level, data.earned, data.hatched, data.dust, data.claimed_rewards, data.mythic_tickets))
     conn.commit()
     conn.close()
     return {"status": "success"}
@@ -625,5 +641,5 @@ if HAS_SOCKETIO:
             reactor['timeLeft'] -= 5
             await sio.emit('wrongCode', {'newTimeLeft': reactor['timeLeft']}, room=room_id)
 
-    # Оборачиваем FastAPI
+    # Оборачиваем FastAPI без конфликта с POST-маршрутами
     app = socketio.ASGIApp(sio, other_asgi_app=app)

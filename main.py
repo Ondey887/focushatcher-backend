@@ -24,69 +24,6 @@ app.add_middleware(
 )
 
 # ==========================================
-# WEBSOCKETS (SOCKET.IO) ДЛЯ РЕАКТОРА
-# ==========================================
-sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
-socket_app = socketio.ASGIApp(sio, app)
-
-active_reactors = {}
-GENES = ['🔴', '🔵', '🟢', '🟡', '🟣']
-
-async def reactor_timer_task(room_id):
-    """Фоновый цикл сервера: тикает каждую секунду и рассылает время в комнату"""
-    while room_id in active_reactors:
-        await asyncio.sleep(1)
-        reactor = active_reactors.get(room_id)
-        if not reactor:
-            break
-        
-        reactor['timeLeft'] -= 1
-        await sio.emit('timerUpdate', reactor['timeLeft'], room=room_id)
-        
-        if reactor['timeLeft'] <= 0:
-            await sio.emit('gameOver', {'result': 'lose'}, room=room_id)
-            if room_id in active_reactors:
-                del active_reactors[room_id]
-            break
-
-@sio.on('joinRoom')
-async def join_room(sid, data):
-    """Клиенты должны вызывать это при входе в Пати, чтобы получать события Реактора"""
-    room_id = data.get('roomId')
-    if room_id:
-        sio.enter_room(sid, room_id)
-
-@sio.on('submitCode')
-async def handle_submit_code(sid, data):
-    """Обработка введенного кода от Инженера"""
-    room_id = data.get('roomId')
-    code = data.get('code')
-    reactor = active_reactors.get(room_id)
-    
-    if not reactor: return
-    
-    if code == reactor['secretCode']:
-        reactor['progress'] += 1
-        
-        if reactor['progress'] >= 3:
-            # 3 успешных ввода - победа
-            await sio.emit('gameWon', {'result': 'win'}, room=room_id)
-            if room_id in active_reactors:
-                del active_reactors[room_id]
-        else:
-            # Выдаем новый код
-            reactor['secretCode'] = random.choices(GENES, k=4)
-            await sio.emit('correctCode', {
-                'newCode': reactor['secretCode'], 
-                'progress': reactor['progress']
-            }, room=room_id)
-    else:
-        # Ошибка - штраф по времени
-        reactor['timeLeft'] -= 5
-        await sio.emit('wrongCode', {'newTimeLeft': reactor['timeLeft']}, room=room_id)
-
-
-# ==========================================
 # БАЗА ДАННЫХ И ИНИЦИАЛИЗАЦИЯ
 # ==========================================
 DB_PATH = "/data/party.db"
@@ -400,7 +337,6 @@ def set_game(data: SetGameData):
         if data.game_name == 'none':
             c.execute("UPDATE parties SET expedition_end=0, expedition_score=0, wolf_hp=0, mega_radar=0 WHERE code=?", (data.code,))
             c.execute("UPDATE players SET boss_hp=0 WHERE party_code=?", (data.code,))
-            # Остановка реактора
             if data.code in active_reactors:
                 del active_reactors[data.code]
                 
@@ -409,13 +345,11 @@ def set_game(data: SetGameData):
             c.execute("UPDATE players SET boss_hp=0 WHERE party_code=?", (data.code,))
             
         elif data.game_name == 'quantum_reactor':
-            # Инициализация Реактора
             active_reactors[data.code] = {
                 'timeLeft': 60,
                 'progress': 0,
                 'secretCode': random.choices(GENES, k=4)
             }
-            # Запускаем фоновый цикл для таймера
             sio.start_background_task(reactor_timer_task, data.code)
             
         conn.commit()
@@ -619,7 +553,65 @@ def clear_invite(data: CodeOnly):
     conn.close()
     return {"status": "success"}
 
-if __name__ == "__main__":
-    import uvicorn
-    # ЗАМЕНА: Запускаем обертку socket_app вместо обычного app
-    uvicorn.run(socket_app, host="0.0.0.0", port=8000)
+
+# ==========================================
+# ИЗОЛЯЦИЯ МАРШРУТОВ (WEBSOCKETS + FASTAPI)
+# ==========================================
+sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
+sio_app = socketio.ASGIApp(sio)
+
+async def reactor_timer_task(room_id):
+    while room_id in active_reactors:
+        await asyncio.sleep(1)
+        reactor = active_reactors.get(room_id)
+        if not reactor:
+            break
+        
+        reactor['timeLeft'] -= 1
+        await sio.emit('timerUpdate', reactor['timeLeft'], room=room_id)
+        
+        if reactor['timeLeft'] <= 0:
+            await sio.emit('gameOver', {'result': 'lose'}, room=room_id)
+            if room_id in active_reactors:
+                del active_reactors[room_id]
+            break
+
+@sio.on('joinRoom')
+async def join_room(sid, data):
+    room_id = data.get('roomId')
+    if room_id:
+        sio.enter_room(sid, room_id)
+
+@sio.on('submitCode')
+async def handle_submit_code(sid, data):
+    room_id = data.get('roomId')
+    code = data.get('code')
+    reactor = active_reactors.get(room_id)
+    
+    if not reactor: return
+    
+    if code == reactor['secretCode']:
+        reactor['progress'] += 1
+        if reactor['progress'] >= 3:
+            await sio.emit('gameWon', {'result': 'win'}, room=room_id)
+            if room_id in active_reactors:
+                del active_reactors[room_id]
+        else:
+            reactor['secretCode'] = random.choices(GENES, k=4)
+            await sio.emit('correctCode', {
+                'newCode': reactor['secretCode'], 
+                'progress': reactor['progress']
+            }, room=room_id)
+    else:
+        reactor['timeLeft'] -= 5
+        await sio.emit('wrongCode', {'newTimeLeft': reactor['timeLeft']}, room=room_id)
+
+# Обертка для разделения POST-запросов и WebSockets,
+# чтобы python-socketio не "съедал" JSON-тело запросов.
+fastapi_app = app
+
+async def app(scope, receive, send):
+    if scope["type"] in ["http", "websocket"] and scope["path"].startswith("/socket.io"):
+        await sio_app(scope, receive, send)
+    else:
+        await fastapi_app(scope, receive, send)

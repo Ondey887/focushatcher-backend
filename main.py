@@ -102,7 +102,7 @@ def init_db():
                     level INTEGER, earned INTEGER, hatched INTEGER
                  )''')
                  
-    # Новые поля для обновления (Пыль, Батл Пасс, Тикеты)
+    # Поля для Пыли, Батл Пасса, Тикетов
     try: c.execute("ALTER TABLE global_users ADD COLUMN dust INTEGER DEFAULT 0")
     except sqlite3.OperationalError: pass
     
@@ -110,6 +110,13 @@ def init_db():
     except sqlite3.OperationalError: pass
     
     try: c.execute("ALTER TABLE global_users ADD COLUMN mythic_tickets INTEGER DEFAULT 0")
+    except sqlite3.OperationalError: pass
+
+    # === НОВОЕ: ВИТРИНА И ФОН ПРОФИЛЯ ===
+    try: c.execute("ALTER TABLE global_users ADD COLUMN active_theme TEXT DEFAULT 'default'")
+    except sqlite3.OperationalError: pass
+    
+    try: c.execute("ALTER TABLE global_users ADD COLUMN showcase TEXT DEFAULT '{\"center\":null,\"left\":null,\"right\":null}'")
     except sqlite3.OperationalError: pass
 
     c.execute('''CREATE TABLE IF NOT EXISTS friends (
@@ -164,7 +171,7 @@ class AdminPromoCreate(BaseModel): password: str; code: str; type: str; val: int
 class MarketLot(BaseModel): seller_id: str; seller_name: str; pet_id: str; pet_stars: int; price: int; currency: str
 class BuyRequest(BaseModel): lot_id: str; buyer_id: str
 
-# Обновленная модель для синхронизации с Батл Пассом
+# Обновленная модель (Добавлены active_theme и showcase)
 class GlobalUserSync(BaseModel): 
     user_id: str
     name: str
@@ -175,6 +182,8 @@ class GlobalUserSync(BaseModel):
     dust: int = 0
     claimed_rewards: str = "[]"
     mythic_tickets: int = 0
+    active_theme: str = "default"
+    showcase: str = '{"center":null,"left":null,"right":null}'
 
 # ==========================================
 # РЫНОК
@@ -249,11 +258,12 @@ def check_market_rewards(user_id: str):
 def get_forbes(user_id: str):
     conn = get_db()
     c = conn.cursor()
-    c.execute('SELECT user_id, name, avatar, earned, level FROM global_users ORDER BY earned DESC LIMIT 50')
+    # ИСПРАВЛЕНИЕ: Теперь мы берем и данные для карточки игрока
+    c.execute('SELECT user_id, name, avatar, earned, level, hatched, active_theme, showcase FROM global_users ORDER BY earned DESC LIMIT 50')
     global_top = [dict(row) for row in c.fetchall()]
-    c.execute('''SELECT g.user_id, g.name, g.avatar, g.earned, g.level FROM friends f JOIN global_users g ON f.friend_id = g.user_id WHERE f.user_id=?''', (user_id,))
+    c.execute('''SELECT g.user_id, g.name, g.avatar, g.earned, g.level, g.hatched, g.active_theme, g.showcase FROM friends f JOIN global_users g ON f.friend_id = g.user_id WHERE f.user_id=?''', (user_id,))
     friends_top = [dict(row) for row in c.fetchall()]
-    c.execute('SELECT user_id, name, avatar, earned, level FROM global_users WHERE user_id=?', (user_id,))
+    c.execute('SELECT user_id, name, avatar, earned, level, hatched, active_theme, showcase FROM global_users WHERE user_id=?', (user_id,))
     self_user = c.fetchone()
     if self_user:
         if not any(f['user_id'] == user_id for f in friends_top):
@@ -531,14 +541,15 @@ def leave_party(data: PlayerData):
 def sync_global_user(data: GlobalUserSync):
     conn = get_db()
     c = conn.cursor()
-    # Обновленный запрос: сохраняем claimed_rewards и mythic_tickets
-    c.execute('''INSERT INTO global_users (user_id, name, avatar, level, earned, hatched, dust, claimed_rewards, mythic_tickets) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) 
+    # ИСПРАВЛЕНИЕ: Добавили active_theme и showcase
+    c.execute('''INSERT INTO global_users (user_id, name, avatar, level, earned, hatched, dust, claimed_rewards, mythic_tickets, active_theme, showcase) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) 
                  ON CONFLICT(user_id) DO UPDATE SET 
                  name=excluded.name, avatar=excluded.avatar, level=excluded.level, 
                  earned=excluded.earned, hatched=excluded.hatched, dust=excluded.dust,
-                 claimed_rewards=excluded.claimed_rewards, mythic_tickets=excluded.mythic_tickets''', 
-              (data.user_id, data.name, data.avatar, data.level, data.earned, data.hatched, data.dust, data.claimed_rewards, data.mythic_tickets))
+                 claimed_rewards=excluded.claimed_rewards, mythic_tickets=excluded.mythic_tickets,
+                 active_theme=excluded.active_theme, showcase=excluded.showcase''', 
+              (data.user_id, data.name, data.avatar, data.level, data.earned, data.hatched, data.dust, data.claimed_rewards, data.mythic_tickets, data.active_theme, data.showcase))
     conn.commit()
     conn.close()
     return {"status": "success"}
@@ -566,6 +577,7 @@ def add_friend(data: FriendAction):
 def get_friends_list(user_id: str):
     conn = get_db()
     c = conn.cursor()
+    # Берем ВСЕ данные друга (включая active_theme и showcase)
     c.execute('''SELECT g.* FROM friends f JOIN global_users g ON f.friend_id = g.user_id WHERE f.user_id=?''', (user_id,))
     friends = [dict(row) for row in c.fetchall()]
     conn.close()

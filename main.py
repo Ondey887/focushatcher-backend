@@ -102,7 +102,7 @@ def init_db():
                     level INTEGER, earned INTEGER, hatched INTEGER
                  )''')
                  
-    # Поля для Пыли, Батл Пасса, Тикетов
+    # Поля для Пыли, Батл Пасса, Тикетов, Витрины
     try: c.execute("ALTER TABLE global_users ADD COLUMN dust INTEGER DEFAULT 0")
     except sqlite3.OperationalError: pass
     
@@ -112,11 +112,23 @@ def init_db():
     try: c.execute("ALTER TABLE global_users ADD COLUMN mythic_tickets INTEGER DEFAULT 0")
     except sqlite3.OperationalError: pass
 
-    # === НОВОЕ: ВИТРИНА И ФОН ПРОФИЛЯ ===
     try: c.execute("ALTER TABLE global_users ADD COLUMN active_theme TEXT DEFAULT 'default'")
     except sqlite3.OperationalError: pass
     
     try: c.execute("ALTER TABLE global_users ADD COLUMN showcase TEXT DEFAULT '{\"center\":null,\"left\":null,\"right\":null}'")
+    except sqlite3.OperationalError: pass
+
+    # === НОВОЕ: СИНДИКАТЫ (КЛАНЫ) ===
+    c.execute('''CREATE TABLE IF NOT EXISTS syndicates (
+                    id TEXT PRIMARY KEY, name TEXT, tag TEXT, 
+                    leader_id TEXT, total_minutes INTEGER DEFAULT 0, 
+                    level INTEGER DEFAULT 1, avatar TEXT
+                 )''')
+                 
+    try: c.execute("ALTER TABLE global_users ADD COLUMN syndicate_id TEXT DEFAULT NULL")
+    except sqlite3.OperationalError: pass
+    
+    try: c.execute("ALTER TABLE global_users ADD COLUMN syndicate_minutes INTEGER DEFAULT 0")
     except sqlite3.OperationalError: pass
 
     c.execute('''CREATE TABLE IF NOT EXISTS friends (
@@ -171,7 +183,6 @@ class AdminPromoCreate(BaseModel): password: str; code: str; type: str; val: int
 class MarketLot(BaseModel): seller_id: str; seller_name: str; pet_id: str; pet_stars: int; price: int; currency: str
 class BuyRequest(BaseModel): lot_id: str; buyer_id: str
 
-# Обновленная модель (Добавлены active_theme и showcase)
 class GlobalUserSync(BaseModel): 
     user_id: str
     name: str
@@ -184,6 +195,152 @@ class GlobalUserSync(BaseModel):
     mythic_tickets: int = 0
     active_theme: str = "default"
     showcase: str = '{"center":null,"left":null,"right":null}'
+
+# Модели для Синдикатов
+class SyndicateCreate(BaseModel): user_id: str; name: str; tag: str; avatar: str
+class SyndicateJoin(BaseModel): user_id: str; syndicate_id: str
+class SyndicateLeave(BaseModel): user_id: str
+class SyndicateAddMinutes(BaseModel): user_id: str; minutes: int
+
+# ==========================================
+# СИНДИКАТЫ (КЛАНЫ)
+# ==========================================
+@app.post("/api/syndicates/create")
+@app.post("/api/api/syndicates/create")
+def create_syndicate(data: SyndicateCreate):
+    conn = get_db()
+    c = conn.cursor()
+    
+    # Проверка, есть ли уже клан у игрока
+    c.execute("SELECT syndicate_id FROM global_users WHERE user_id=?", (data.user_id,))
+    row = c.fetchone()
+    if row and row['syndicate_id']:
+        conn.close()
+        return {"status": "error", "detail": "Вы уже состоите в Синдикате!"}
+    
+    syn_id = str(uuid.uuid4())[:8].upper()
+    c.execute("INSERT INTO syndicates (id, name, tag, leader_id, avatar) VALUES (?, ?, ?, ?, ?)",
+              (syn_id, data.name, data.tag, data.user_id, data.avatar))
+              
+    # Привязываем создателя к клану
+    c.execute("UPDATE global_users SET syndicate_id=?, syndicate_minutes=0 WHERE user_id=?", (syn_id, data.user_id))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "syndicate_id": syn_id}
+
+@app.post("/api/syndicates/join")
+@app.post("/api/api/syndicates/join")
+def join_syndicate(data: SyndicateJoin):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT syndicate_id FROM global_users WHERE user_id=?", (data.user_id,))
+    row = c.fetchone()
+    if row and row['syndicate_id']:
+        conn.close()
+        return {"status": "error", "detail": "Вы уже состоите в Синдикате!"}
+        
+    c.execute("SELECT * FROM syndicates WHERE id=?", (data.syndicate_id,))
+    if not c.fetchone():
+        conn.close()
+        return {"status": "error", "detail": "Синдикат не найден"}
+    
+    c.execute("SELECT COUNT(*) FROM global_users WHERE syndicate_id=?", (data.syndicate_id,))
+    if c.fetchone()[0] >= 50:
+        conn.close()
+        return {"status": "error", "detail": "Синдикат заполнен (макс 50 участников)"}
+        
+    c.execute("UPDATE global_users SET syndicate_id=?, syndicate_minutes=0 WHERE user_id=?", (data.syndicate_id, data.user_id))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.post("/api/syndicates/leave")
+@app.post("/api/api/syndicates/leave")
+def leave_syndicate(data: SyndicateLeave):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT syndicate_id FROM global_users WHERE user_id=?", (data.user_id,))
+    row = c.fetchone()
+    if row and row['syndicate_id']:
+        syn_id = row['syndicate_id']
+        c.execute("SELECT leader_id FROM syndicates WHERE id=?", (syn_id,))
+        syn = c.fetchone()
+        
+        if syn and syn['leader_id'] == data.user_id:
+            # Если выходит создатель — распускаем клан и кикаем всех
+            c.execute("UPDATE global_users SET syndicate_id=NULL, syndicate_minutes=0 WHERE syndicate_id=?", (syn_id,))
+            c.execute("DELETE FROM syndicates WHERE id=?", (syn_id,))
+        else:
+            # Обычный участник просто выходит
+            c.execute("UPDATE global_users SET syndicate_id=NULL, syndicate_minutes=0 WHERE user_id=?", (data.user_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.post("/api/syndicates/add_minutes")
+@app.post("/api/api/syndicates/add_minutes")
+def syndicate_add_minutes(data: SyndicateAddMinutes):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT syndicate_id FROM global_users WHERE user_id=?", (data.user_id,))
+    row = c.fetchone()
+    if row and row['syndicate_id']:
+        syn_id = row['syndicate_id']
+        # Добавляем минуты в личную стату и в стату клана
+        c.execute("UPDATE global_users SET syndicate_minutes = syndicate_minutes + ? WHERE user_id=?", (data.minutes, data.user_id))
+        c.execute("UPDATE syndicates SET total_minutes = total_minutes + ? WHERE id=?", (data.minutes, syn_id))
+        
+        # Обновляем уровень Синдиката (1 лвл = 1000 минут)
+        c.execute("SELECT total_minutes FROM syndicates WHERE id=?", (syn_id,))
+        tm = c.fetchone()['total_minutes']
+        new_lvl = max(1, min(100, tm // 1000 + 1))
+        c.execute("UPDATE syndicates SET level=? WHERE id=?", (new_lvl, syn_id))
+        
+        conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.get("/api/syndicates/top")
+@app.get("/api/api/syndicates/top")
+def get_top_syndicates():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM syndicates ORDER BY total_minutes DESC LIMIT 20")
+    syndicates = [dict(row) for row in c.fetchall()]
+    for syn in syndicates:
+        c.execute("SELECT COUNT(*) FROM global_users WHERE syndicate_id=?", (syn['id'],))
+        syn['members_count'] = c.fetchone()[0]
+    conn.close()
+    return {"syndicates": syndicates}
+
+@app.get("/api/syndicates/info/{syndicate_id}")
+@app.get("/api/api/syndicates/info/{syndicate_id}")
+def get_syndicate_info(syndicate_id: str):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT * FROM syndicates WHERE id=?", (syndicate_id,))
+    syn = c.fetchone()
+    if not syn:
+        conn.close()
+        return {"status": "error"}
+        
+    c.execute("SELECT user_id, name, avatar, level, syndicate_minutes FROM global_users WHERE syndicate_id=? ORDER BY syndicate_minutes DESC", (syndicate_id,))
+    members = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return {"status": "success", "syndicate": dict(syn), "members": members}
+
+@app.get("/api/syndicates/my/{user_id}")
+@app.get("/api/api/syndicates/my/{user_id}")
+def get_my_syndicate(user_id: str):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT syndicate_id FROM global_users WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if row and row['syndicate_id']:
+        return {"status": "success", "syndicate_id": row['syndicate_id']}
+    return {"status": "error", "syndicate_id": None}
+
 
 # ==========================================
 # РЫНОК
@@ -258,7 +415,6 @@ def check_market_rewards(user_id: str):
 def get_forbes(user_id: str):
     conn = get_db()
     c = conn.cursor()
-    # ИСПРАВЛЕНИЕ: Теперь мы берем и данные для карточки игрока
     c.execute('SELECT user_id, name, avatar, earned, level, hatched, active_theme, showcase FROM global_users ORDER BY earned DESC LIMIT 50')
     global_top = [dict(row) for row in c.fetchall()]
     c.execute('''SELECT g.user_id, g.name, g.avatar, g.earned, g.level, g.hatched, g.active_theme, g.showcase FROM friends f JOIN global_users g ON f.friend_id = g.user_id WHERE f.user_id=?''', (user_id,))
@@ -541,7 +697,6 @@ def leave_party(data: PlayerData):
 def sync_global_user(data: GlobalUserSync):
     conn = get_db()
     c = conn.cursor()
-    # ИСПРАВЛЕНИЕ: Добавили active_theme и showcase
     c.execute('''INSERT INTO global_users (user_id, name, avatar, level, earned, hatched, dust, claimed_rewards, mythic_tickets, active_theme, showcase) 
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) 
                  ON CONFLICT(user_id) DO UPDATE SET 
@@ -577,7 +732,6 @@ def add_friend(data: FriendAction):
 def get_friends_list(user_id: str):
     conn = get_db()
     c = conn.cursor()
-    # Берем ВСЕ данные друга (включая active_theme и showcase)
     c.execute('''SELECT g.* FROM friends f JOIN global_users g ON f.friend_id = g.user_id WHERE f.user_id=?''', (user_id,))
     friends = [dict(row) for row in c.fetchall()]
     conn.close()

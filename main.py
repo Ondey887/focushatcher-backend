@@ -91,7 +91,8 @@ def init_db():
         try: c.execute(f"ALTER TABLE parties ADD COLUMN {col} {col_type}")
         except sqlite3.OperationalError: pass
 
-    player_columns = [("boss_hp", "INTEGER DEFAULT 0"), ("egg_skin", "TEXT DEFAULT 'default'")]
+    # Добавляем equipped_title в players для пати
+    player_columns = [("boss_hp", "INTEGER DEFAULT 0"), ("egg_skin", "TEXT DEFAULT 'default'"), ("equipped_title", "TEXT DEFAULT ''")]
     for col, col_type in player_columns:
         try: c.execute(f"ALTER TABLE players ADD COLUMN {col} {col_type}")
         except sqlite3.OperationalError: pass
@@ -118,7 +119,23 @@ def init_db():
     try: c.execute("ALTER TABLE global_users ADD COLUMN showcase TEXT DEFAULT '{\"center\":null,\"left\":null,\"right\":null}'")
     except sqlite3.OperationalError: pass
 
-    # === НОВОЕ: СИНДИКАТЫ (КЛАНЫ) ===
+    # === НОВЫЕ ПОЛЯ ДЛЯ ДОСТИЖЕНИЙ И ТИТУЛОВ ===
+    try: c.execute("ALTER TABLE global_users ADD COLUMN focus_hours REAL DEFAULT 0")
+    except sqlite3.OperationalError: pass
+
+    try: c.execute("ALTER TABLE global_users ADD COLUMN mythics_crafted INTEGER DEFAULT 0")
+    except sqlite3.OperationalError: pass
+
+    try: c.execute("ALTER TABLE global_users ADD COLUMN reactor_wins INTEGER DEFAULT 0")
+    except sqlite3.OperationalError: pass
+
+    try: c.execute("ALTER TABLE global_users ADD COLUMN equipped_title TEXT DEFAULT ''")
+    except sqlite3.OperationalError: pass
+
+    try: c.execute("ALTER TABLE global_users ADD COLUMN unlocked_titles TEXT DEFAULT '[]'")
+    except sqlite3.OperationalError: pass
+
+    # СИНДИКАТЫ (КЛАНЫ)
     c.execute('''CREATE TABLE IF NOT EXISTS syndicates (
                     id TEXT PRIMARY KEY, name TEXT, tag TEXT, 
                     leader_id TEXT, total_minutes INTEGER DEFAULT 0, 
@@ -168,7 +185,13 @@ def init_db():
 init_db()
 
 # --- МОДЕЛИ ---
-class PlayerData(BaseModel): user_id: str; name: str; avatar: str; egg_skin: str
+class PlayerData(BaseModel): 
+    user_id: str
+    name: str
+    avatar: str
+    egg_skin: str
+    equipped_title: str = ""
+
 class JoinData(PlayerData): code: str
 class DamageData(BaseModel): code: str; user_id: str; damage: int
 class TimeData(BaseModel): code: str; seconds: int
@@ -195,6 +218,11 @@ class GlobalUserSync(BaseModel):
     mythic_tickets: int = 0
     active_theme: str = "default"
     showcase: str = '{"center":null,"left":null,"right":null}'
+    focus_hours: float = 0
+    mythics_crafted: int = 0
+    reactor_wins: int = 0
+    equipped_title: str = ""
+    unlocked_titles: str = "[]"
 
 # Модели для Синдикатов
 class SyndicateCreate(BaseModel): user_id: str; name: str; tag: str; avatar: str
@@ -211,7 +239,6 @@ def create_syndicate(data: SyndicateCreate):
     conn = get_db()
     c = conn.cursor()
     
-    # Проверка, есть ли уже клан у игрока
     c.execute("SELECT syndicate_id FROM global_users WHERE user_id=?", (data.user_id,))
     row = c.fetchone()
     if row and row['syndicate_id']:
@@ -222,7 +249,6 @@ def create_syndicate(data: SyndicateCreate):
     c.execute("INSERT INTO syndicates (id, name, tag, leader_id, avatar) VALUES (?, ?, ?, ?, ?)",
               (syn_id, data.name, data.tag, data.user_id, data.avatar))
               
-    # Привязываем создателя к клану
     c.execute("UPDATE global_users SET syndicate_id=?, syndicate_minutes=0 WHERE user_id=?", (syn_id, data.user_id))
     conn.commit()
     conn.close()
@@ -267,12 +293,26 @@ def leave_syndicate(data: SyndicateLeave):
         syn = c.fetchone()
         
         if syn and syn['leader_id'] == data.user_id:
-            # Если выходит создатель — распускаем клан и кикаем всех
             c.execute("UPDATE global_users SET syndicate_id=NULL, syndicate_minutes=0 WHERE syndicate_id=?", (syn_id,))
             c.execute("DELETE FROM syndicates WHERE id=?", (syn_id,))
         else:
-            # Обычный участник просто выходит
             c.execute("UPDATE global_users SET syndicate_id=NULL, syndicate_minutes=0 WHERE user_id=?", (data.user_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "success"}
+
+@app.post("/api/syndicates/edit")
+@app.post("/api/api/syndicates/edit")
+def edit_syndicate(data: SyndicateCreate):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT id, leader_id FROM syndicates WHERE leader_id=?", (data.user_id,))
+    syn = c.fetchone()
+    if not syn:
+        conn.close()
+        return {"status": "error", "detail": "Вы не лидер Синдиката!"}
+        
+    c.execute("UPDATE syndicates SET name=?, tag=?, avatar=? WHERE id=?", (data.name, data.tag, data.avatar, syn['id']))
     conn.commit()
     conn.close()
     return {"status": "success"}
@@ -286,11 +326,9 @@ def syndicate_add_minutes(data: SyndicateAddMinutes):
     row = c.fetchone()
     if row and row['syndicate_id']:
         syn_id = row['syndicate_id']
-        # Добавляем минуты в личную стату и в стату клана
         c.execute("UPDATE global_users SET syndicate_minutes = syndicate_minutes + ? WHERE user_id=?", (data.minutes, data.user_id))
         c.execute("UPDATE syndicates SET total_minutes = total_minutes + ? WHERE id=?", (data.minutes, syn_id))
         
-        # Обновляем уровень Синдиката (1 лвл = 1000 минут)
         c.execute("SELECT total_minutes FROM syndicates WHERE id=?", (syn_id,))
         tm = c.fetchone()['total_minutes']
         new_lvl = max(1, min(100, tm // 1000 + 1))
@@ -324,7 +362,7 @@ def get_syndicate_info(syndicate_id: str):
         conn.close()
         return {"status": "error"}
         
-    c.execute("SELECT user_id, name, avatar, level, syndicate_minutes FROM global_users WHERE syndicate_id=? ORDER BY syndicate_minutes DESC", (syndicate_id,))
+    c.execute("SELECT user_id, name, avatar, level, syndicate_minutes, equipped_title, syndicate_id FROM global_users WHERE syndicate_id=? ORDER BY syndicate_minutes DESC", (syndicate_id,))
     members = [dict(row) for row in c.fetchall()]
     conn.close()
     return {"status": "success", "syndicate": dict(syn), "members": members}
@@ -415,15 +453,33 @@ def check_market_rewards(user_id: str):
 def get_forbes(user_id: str):
     conn = get_db()
     c = conn.cursor()
-    c.execute('SELECT user_id, name, avatar, earned, level, hatched, active_theme, showcase FROM global_users ORDER BY earned DESC LIMIT 50')
+    c.execute('''SELECT global_users.user_id, global_users.name, global_users.avatar, global_users.earned, 
+                 global_users.level, global_users.hatched, global_users.active_theme, global_users.showcase, 
+                 global_users.equipped_title, syndicates.tag as syndicate_tag
+                 FROM global_users 
+                 LEFT JOIN syndicates ON global_users.syndicate_id = syndicates.id 
+                 ORDER BY earned DESC LIMIT 50''')
     global_top = [dict(row) for row in c.fetchall()]
-    c.execute('''SELECT g.user_id, g.name, g.avatar, g.earned, g.level, g.hatched, g.active_theme, g.showcase FROM friends f JOIN global_users g ON f.friend_id = g.user_id WHERE f.user_id=?''', (user_id,))
+    
+    c.execute('''SELECT g.user_id, g.name, g.avatar, g.earned, g.level, g.hatched, g.active_theme, g.showcase, 
+                 g.equipped_title, s.tag as syndicate_tag
+                 FROM friends f 
+                 JOIN global_users g ON f.friend_id = g.user_id 
+                 LEFT JOIN syndicates s ON g.syndicate_id = s.id
+                 WHERE f.user_id=?''', (user_id,))
     friends_top = [dict(row) for row in c.fetchall()]
-    c.execute('SELECT user_id, name, avatar, earned, level, hatched, active_theme, showcase FROM global_users WHERE user_id=?', (user_id,))
+    
+    c.execute('''SELECT g.user_id, g.name, g.avatar, g.earned, g.level, g.hatched, g.active_theme, g.showcase, 
+                 g.equipped_title, s.tag as syndicate_tag 
+                 FROM global_users g 
+                 LEFT JOIN syndicates s ON g.syndicate_id = s.id 
+                 WHERE g.user_id=?''', (user_id,))
     self_user = c.fetchone()
+    
     if self_user:
         if not any(f['user_id'] == user_id for f in friends_top):
             friends_top.append(dict(self_user))
+            
     friends_top.sort(key=lambda x: x['earned'], reverse=True)
     conn.close()
     return {"global": global_top, "friends": friends_top}
@@ -491,8 +547,8 @@ def create_party(data: PlayerData):
     c.execute("INSERT INTO parties (code, boss_hp, boss_max_hp, mega_progress, mega_target, expedition_end, expedition_score, leader_id, active_game, expedition_location, wolf_hp, wolf_max_hp, mega_radar) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 
               (code, 10000, 10000, 0, 36000, 0, 0, data.user_id, 'none', 'forest', 0, 0, 0))
     c.execute("DELETE FROM players WHERE user_id=?", (data.user_id,))
-    c.execute("INSERT INTO players (user_id, party_code, name, avatar, boss_hp, egg_skin) VALUES (?, ?, ?, ?, ?, ?)", 
-              (data.user_id, code, data.name, data.avatar, 0, data.egg_skin))
+    c.execute("INSERT INTO players (user_id, party_code, name, avatar, boss_hp, egg_skin, equipped_title) VALUES (?, ?, ?, ?, ?, ?, ?)", 
+              (data.user_id, code, data.name, data.avatar, 0, data.egg_skin, data.equipped_title))
     conn.commit()
     conn.close()
     return {"status": "success", "partyCode": code}
@@ -507,8 +563,8 @@ def join_party(data: JoinData):
         conn.close()
         raise HTTPException(status_code=404, detail="Пати не найдено")
     c.execute("DELETE FROM players WHERE user_id=?", (data.user_id,))
-    c.execute("INSERT INTO players (user_id, party_code, name, avatar, boss_hp, egg_skin) VALUES (?, ?, ?, ?, ?, ?)", 
-              (data.user_id, data.code, data.name, data.avatar, 0, data.egg_skin))
+    c.execute("INSERT INTO players (user_id, party_code, name, avatar, boss_hp, egg_skin, equipped_title) VALUES (?, ?, ?, ?, ?, ?, ?)", 
+              (data.user_id, data.code, data.name, data.avatar, 0, data.egg_skin, data.equipped_title))
     conn.commit()
     conn.close()
     return {"status": "success"}
@@ -528,7 +584,7 @@ def get_party_status(code: str):
         c.execute("UPDATE parties SET wolf_hp=0 WHERE code=?", (code,))
         conn.commit()
         w_hp = 0
-    c.execute("SELECT user_id, name, avatar, boss_hp, egg_skin FROM players WHERE party_code=?", (code,))
+    c.execute("SELECT user_id, name, avatar, boss_hp, egg_skin, equipped_title FROM players WHERE party_code=?", (code,))
     players = [dict(row) for row in c.fetchall()]
     conn.close()
     return {
@@ -697,14 +753,17 @@ def leave_party(data: PlayerData):
 def sync_global_user(data: GlobalUserSync):
     conn = get_db()
     c = conn.cursor()
-    c.execute('''INSERT INTO global_users (user_id, name, avatar, level, earned, hatched, dust, claimed_rewards, mythic_tickets, active_theme, showcase) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) 
+    c.execute('''INSERT INTO global_users (user_id, name, avatar, level, earned, hatched, dust, claimed_rewards, mythic_tickets, active_theme, showcase, focus_hours, mythics_crafted, reactor_wins, equipped_title, unlocked_titles) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) 
                  ON CONFLICT(user_id) DO UPDATE SET 
                  name=excluded.name, avatar=excluded.avatar, level=excluded.level, 
                  earned=excluded.earned, hatched=excluded.hatched, dust=excluded.dust,
                  claimed_rewards=excluded.claimed_rewards, mythic_tickets=excluded.mythic_tickets,
-                 active_theme=excluded.active_theme, showcase=excluded.showcase''', 
-              (data.user_id, data.name, data.avatar, data.level, data.earned, data.hatched, data.dust, data.claimed_rewards, data.mythic_tickets, data.active_theme, data.showcase))
+                 active_theme=excluded.active_theme, showcase=excluded.showcase,
+                 focus_hours=excluded.focus_hours, mythics_crafted=excluded.mythics_crafted,
+                 reactor_wins=excluded.reactor_wins, equipped_title=excluded.equipped_title,
+                 unlocked_titles=excluded.unlocked_titles''', 
+              (data.user_id, data.name, data.avatar, data.level, data.earned, data.hatched, data.dust, data.claimed_rewards, data.mythic_tickets, data.active_theme, data.showcase, data.focus_hours, data.mythics_crafted, data.reactor_wins, data.equipped_title, data.unlocked_titles))
     conn.commit()
     conn.close()
     return {"status": "success"}
@@ -732,7 +791,9 @@ def add_friend(data: FriendAction):
 def get_friends_list(user_id: str):
     conn = get_db()
     c = conn.cursor()
-    c.execute('''SELECT g.* FROM friends f JOIN global_users g ON f.friend_id = g.user_id WHERE f.user_id=?''', (user_id,))
+    c.execute('''SELECT g.user_id, g.name, g.avatar, g.level, g.equipped_title, s.tag as syndicate_tag 
+                 FROM friends f JOIN global_users g ON f.friend_id = g.user_id 
+                 LEFT JOIN syndicates s ON g.syndicate_id = s.id WHERE f.user_id=?''', (user_id,))
     friends = [dict(row) for row in c.fetchall()]
     conn.close()
     return {"friends": friends}
@@ -772,7 +833,6 @@ def clear_invite(data: CodeOnly):
     conn.close()
     return {"status": "success"}
 
-
 # ==========================================
 # ИНТЕГРАЦИЯ WEBSOCKETS И FASTAPI
 # ==========================================
@@ -807,5 +867,4 @@ if HAS_SOCKETIO:
             reactor['timeLeft'] -= 5
             await sio.emit('wrongCode', {'newTimeLeft': reactor['timeLeft']}, room=room_id)
 
-    # Оборачиваем FastAPI без конфликта с POST-маршрутами
     app = socketio.ASGIApp(sio, other_asgi_app=app)

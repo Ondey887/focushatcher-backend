@@ -91,7 +91,7 @@ def init_db():
         try: c.execute(f"ALTER TABLE parties ADD COLUMN {col} {col_type}")
         except sqlite3.OperationalError: pass
 
-    # Добавляем equipped_title в players для пати
+    # Добавляем поля в players для пати
     player_columns = [("boss_hp", "INTEGER DEFAULT 0"), ("egg_skin", "TEXT DEFAULT 'default'"), ("equipped_title", "TEXT DEFAULT ''")]
     for col, col_type in player_columns:
         try: c.execute(f"ALTER TABLE players ADD COLUMN {col} {col_type}")
@@ -103,37 +103,19 @@ def init_db():
                     level INTEGER, earned INTEGER, hatched INTEGER
                  )''')
                  
-    # Поля для Пыли, Батл Пасса, Тикетов, Витрины
-    try: c.execute("ALTER TABLE global_users ADD COLUMN dust INTEGER DEFAULT 0")
-    except sqlite3.OperationalError: pass
-    
-    try: c.execute("ALTER TABLE global_users ADD COLUMN claimed_rewards TEXT DEFAULT '[]'")
-    except sqlite3.OperationalError: pass
-    
-    try: c.execute("ALTER TABLE global_users ADD COLUMN mythic_tickets INTEGER DEFAULT 0")
-    except sqlite3.OperationalError: pass
-
-    try: c.execute("ALTER TABLE global_users ADD COLUMN active_theme TEXT DEFAULT 'default'")
-    except sqlite3.OperationalError: pass
-    
-    try: c.execute("ALTER TABLE global_users ADD COLUMN showcase TEXT DEFAULT '{\"center\":null,\"left\":null,\"right\":null}'")
-    except sqlite3.OperationalError: pass
-
-    # === НОВЫЕ ПОЛЯ ДЛЯ ДОСТИЖЕНИЙ И ТИТУЛОВ ===
-    try: c.execute("ALTER TABLE global_users ADD COLUMN focus_hours REAL DEFAULT 0")
-    except sqlite3.OperationalError: pass
-
-    try: c.execute("ALTER TABLE global_users ADD COLUMN mythics_crafted INTEGER DEFAULT 0")
-    except sqlite3.OperationalError: pass
-
-    try: c.execute("ALTER TABLE global_users ADD COLUMN reactor_wins INTEGER DEFAULT 0")
-    except sqlite3.OperationalError: pass
-
-    try: c.execute("ALTER TABLE global_users ADD COLUMN equipped_title TEXT DEFAULT ''")
-    except sqlite3.OperationalError: pass
-
-    try: c.execute("ALTER TABLE global_users ADD COLUMN unlocked_titles TEXT DEFAULT '[]'")
-    except sqlite3.OperationalError: pass
+    # Поля для Пыли, Батл Пасса, Тикетов, Витрины, Титулов
+    user_columns = [
+        ("dust", "INTEGER DEFAULT 0"), ("claimed_rewards", "TEXT DEFAULT '[]'"),
+        ("mythic_tickets", "INTEGER DEFAULT 0"), ("active_theme", "TEXT DEFAULT 'default'"),
+        ("showcase", "TEXT DEFAULT '{\"center\":null,\"left\":null,\"right\":null}'"),
+        ("focus_hours", "REAL DEFAULT 0"), ("mythics_crafted", "INTEGER DEFAULT 0"),
+        ("reactor_wins", "INTEGER DEFAULT 0"), ("equipped_title", "TEXT DEFAULT ''"),
+        ("unlocked_titles", "TEXT DEFAULT '[]'"), ("syndicate_id", "TEXT DEFAULT NULL"),
+        ("syndicate_minutes", "INTEGER DEFAULT 0")
+    ]
+    for col, col_type in user_columns:
+        try: c.execute(f"ALTER TABLE global_users ADD COLUMN {col} {col_type}")
+        except sqlite3.OperationalError: pass
 
     # СИНДИКАТЫ (КЛАНЫ)
     c.execute('''CREATE TABLE IF NOT EXISTS syndicates (
@@ -141,12 +123,6 @@ def init_db():
                     leader_id TEXT, total_minutes INTEGER DEFAULT 0, 
                     level INTEGER DEFAULT 1, avatar TEXT
                  )''')
-                 
-    try: c.execute("ALTER TABLE global_users ADD COLUMN syndicate_id TEXT DEFAULT NULL")
-    except sqlite3.OperationalError: pass
-    
-    try: c.execute("ALTER TABLE global_users ADD COLUMN syndicate_minutes INTEGER DEFAULT 0")
-    except sqlite3.OperationalError: pass
 
     c.execute('''CREATE TABLE IF NOT EXISTS friends (
                     user_id TEXT, friend_id TEXT, UNIQUE(user_id, friend_id)
@@ -224,11 +200,49 @@ class GlobalUserSync(BaseModel):
     equipped_title: str = ""
     unlocked_titles: str = "[]"
 
-# Модели для Синдикатов
 class SyndicateCreate(BaseModel): user_id: str; name: str; tag: str; avatar: str
 class SyndicateJoin(BaseModel): user_id: str; syndicate_id: str
 class SyndicateLeave(BaseModel): user_id: str
 class SyndicateAddMinutes(BaseModel): user_id: str; minutes: int
+
+class MutateRequest(BaseModel):
+    pet1: str
+    pet1_stars: int
+    pet2: str
+    pet2_stars: int
+    catalyst: str
+
+# ==========================================
+# СЕКРЕТНЫЕ МУТАЦИИ (КРАФТ)
+# ==========================================
+@app.post("/api/craft/mutate")
+@app.post("/api/api/craft/mutate")
+def secret_mutate(data: MutateRequest):
+    p1 = data.pet1
+    p2 = data.pet2
+    p1_s = data.pet1_stars
+    p2_s = data.pet2_stars
+    cat = data.catalyst
+
+    legendary_pets = ["unicorn", "dragon", "alien", "robot", "dino", "fireball", "god"]
+
+    # Рецепт 1: Свинья (⭐️3+) + Робот + Джокер (Ген) = Кибер-Хрюшка
+    if cat == "joker":
+        if (p1 == "pig" and p1_s >= 3 and p2 == "robot") or (p2 == "pig" and p2_s >= 3 and p1 == "robot"):
+            return {"status": "success", "result_pet": "cyber_pig", "consumed_pets": True, "message": "Мутация прошла успешно!"}
+            
+    # Рецепт 2: Гусеница + Любая Легендарка + Шприц (bio) = Токсичная Гусеница (Гамма-Ящер как аналог)
+    if cat == "bio":
+        if (p1 == "caterpillar" and p2 in legendary_pets) or (p2 == "caterpillar" and p1 in legendary_pets):
+            return {"status": "success", "result_pet": "mutant_dragon", "consumed_pets": True, "message": "Токсичная реакция успешна!"}
+
+    # Рецепт 3: Кот + Кот + Зелье Удачи (luck) = Квантовый Кот (Кибер-кот как аналог)
+    if cat == "luck":
+        if p1 == "kitten" and p2 == "kitten":
+            return {"status": "success", "result_pet": "cyber_cat", "consumed_pets": True, "message": "Квантовый скачок успешен!"}
+
+    # ПРОВАЛ: Сжигает только катализатор
+    return {"status": "fail", "result_pet": None, "consumed_pets": False, "message": "Нестабильная реакция. Катализатор уничтожен."}
 
 # ==========================================
 # СИНДИКАТЫ (КЛАНЫ)
@@ -238,7 +252,6 @@ class SyndicateAddMinutes(BaseModel): user_id: str; minutes: int
 def create_syndicate(data: SyndicateCreate):
     conn = get_db()
     c = conn.cursor()
-    
     c.execute("SELECT syndicate_id FROM global_users WHERE user_id=?", (data.user_id,))
     row = c.fetchone()
     if row and row['syndicate_id']:
